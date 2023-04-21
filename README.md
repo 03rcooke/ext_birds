@@ -8,4 +8,4 @@ This repository contains the required R code and data files to reproduce the ana
 
 ***
 
-These scripts have been run using R version XXX - Copyright (C) 2023 The R Foundation for Statistical Computing.
+These scripts have been run using R version 4.0.4 - Copyright (C) 2021 The R Foundation for Statistical Computing.
