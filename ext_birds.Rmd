@@ -1,0 +1,2217 @@
+---
+title: "ext_birds"
+author: Rob Cooke (roboke@ceh.ac.uk)
+date: 21/04/2023
+output: 
+  html_notebook:
+    toc: TRUE
+editor_options: 
+  chunk_output_type: inline
+---
+
+## Setup
+
+```{r}
+
+# see renv for all packages
+
+library(dplyr)
+
+# # save snapshot of packages to renv
+# renv::snapshot()
+
+# set theme as cowplot
+ggplot2::theme_set(cowplot::theme_cowplot())
+
+# function for probability-based rounding
+prob_ro <- function(ro) {
+  ifelse(floor(ro) + runif(n(), 0, 1) < ro, floor(ro) + 1, floor(ro))
+}
+
+```
+
+## Raw data
+
+Island data:<br/>
+Weigelt et al., 2013 - https://www.pnas.org/content/110/38/15307
+
+Extinct birds data:<br/>
+Sayol et al., 2020 - https://www.science.org/doi/full/10.1126/sciadv.abb6095
+
+Bird distributions:<br/>
+Bird species distribution maps of the world. Version 2018.1. - http://datazone.birdlife.org/species/requestdis
+
+Gridded climatic data:<br/>
+WorldClim; Hijmans et al., 2005<br/>
+Elevation; Farr, 2007
+
+Landmasses and archipelagos:<br/>
+GADM version 3.6 - https://gadm.org/data.html
+
+Human arrival dates:<br/>
+see references in 'colz'
+
+Extinction probabilities for possibly extinct species: 
+Butchart et al., 2018 - https://doi.org/10.1016/j.biocon.2018.08.014
+
+## Load in preprocessed data
+
+Preprocessing code available upon request (roboke@ceh.ac.uk)
+
+```{r}
+
+# recorded fossil predictor data
+pred_orig <- readr::read_csv("data/pred.csv")
+# Archip = Archipelago; res_eff = Research effort; Dist = Isolation distance; SLMP = Surrounding landmass; Elev = Elevation; Temp = Temperature; Prec = Precipitation; varT = Temperature variability; varP = Precipitation variability; SR_GAM = Archipelago plant richness; tot_area = Total area; sd_area = SD area; pa_rodents = Native rodents; hum = Human arrival; end_spp = Endemic bird species; ext_spp = Fossil bird extinctions; ant_spp = Bird species extant at 1500 CE (extant and observed extinctions [post-1500 CE])
+
+# upper bound predictor data
+dri_orig <- readr::read_csv("data/dri.csv")
+# x = Longitude; y = Latitude; Elev = Elevation; Temp = Temperature; Prec = Precipitation; varT = Temperature variability; varP = Precipitation variability; all_spp = Number of bird species
+
+# archipelago predictor data
+dri_arch_orig <- readr::read_csv("data/dri_arch.csv")
+# Archip = Archipelago; Elev = Elevation; Temp = Temperature; Prec = Precipitation; varT = Temperature variability; varP = Precipitation variability
+
+# MCMC samples from white noise linear model
+# includes 20,000 samples (used 600,000 samples in study)
+mcmc_lin_orig <- readr::read_delim("data/py_mcmc_samples_white_noise_multi_regression_linear_model_interaction_area_reseffort.txt")
+
+# scaled predictors used in white noise linear model
+scaled_pred_orig <- readr::read_csv("data/scaled_pred.csv")
+
+# human arrival dates
+colz_orig <- readr::read_csv("data/colz.csv")
+# Archip = Region; prehist = Prehistorically settled (i.e., pre-1500 CE); cont = Continental; hum = Central human arrival date estimate (years before present); hum_low = Lower estimate of human arrival date (years before present); hum_upp = Upper estimate of human arrival date (years before present); ref = Reference; full_ref = Full reference 
+
+
+```
+
+## Modelling
+
+Transformations and standardization
+
+```{r}
+
+pred <- pred_orig %>% 
+  # drop extant species
+  dplyr::select(-ant_spp)
+
+# transformations
+pred_trans_unscaled <- pred %>% 
+  dplyr::mutate_at(vars(Dist, tot_area, SR_GAM, hum, Elev), log) %>% 
+  dplyr::mutate_at(vars(sd_area, res_eff, end_spp), ~log(. + 1)) 
+
+# centered and scaled to zero mean and unit variance
+pred_trans <- pred_trans_unscaled %>% 
+  dplyr::mutate_at(vars(-Archip, -ext_spp), scale) %>% 
+  dplyr::mutate_at(vars(-Archip, -ext_spp), as.numeric)
+
+```
+
+#### Linear model (LM)
+
+```{r}
+
+# log-transform extinct species
+pred_trans_log <- dplyr::mutate(pred_trans, ext_spp = log(ext_spp + 1))
+
+# model formula
+fmla <- ext_spp ~ Dist + Elev + Temp + varT + Prec + varP + SR_GAM + tot_area + pa_rodents + end_spp + res_eff + hum + tot_area:res_eff
+
+## Linear
+
+# run model
+m1 <- lm(fmla, data = pred_trans_log, na.action = na.pass)
+
+# model summary
+jtools::summ(m1)
+
+# coefficients and partial r2
+coef <- rsq::rsq.partial(m1, type = "sse") %>% 
+  data.frame() %>% 
+  dplyr::mutate(partial.rsq_round = round(partial.rsq, digits = 2)) %>% 
+  dplyr::full_join(broom::tidy(m1, conf.int = TRUE), by = c("variable" = "term"))
+
+```
+
+#### GLM
+
+```{r}
+
+m2 <- glm(fmla, data = pred_trans, family = poisson)
+
+sim_fmp <- DHARMa::simulateResiduals(m2)
+DHARMa::testDispersion(sim_fmp)
+# dispersion = 4.2, p = 0
+
+m3 <- glm(fmla, data = pred_trans, family = quasipoisson)
+
+```
+
+###### Cross-validation of predictive accuracy
+
+```{r}
+
+# leave-one-out-cross-validation
+
+# loocv function
+loocv <- function(i, df, mod) {
+
+  # train data
+  train <- dplyr::filter(df, Archip != i)
+  # test data
+  test <- dplyr::filter(df, Archip == i)
+  
+  # train model
+  up <- update(mod, data = train)
+  # test model
+  pd <- predict(up, newdata = test, type = "response")
+  
+}
+
+# cross-validate m1
+cv1 <- sapply(pred_trans_log$Archip, function(i) loocv(i = i, df = pred_trans_log, mod = m1)) %>% 
+  # back-transform
+  exp(.) - 1
+
+# goodness-of-fit m1
+met1 <- hydroGOF::gof(cv1, exp(pred_trans_log$ext_spp) - 1, do.spearman = TRUE)
+
+# cross-validate m3
+cv3 <- sapply(pred_trans$Archip, function(i) loocv(i = i, df = pred_trans, mod = m3))
+
+# goodness-of-fit m3
+met3 <- hydroGOF::gof(cv3, pred_trans$ext_spp, do.spearman = TRUE)
+
+```
+
+## Extrapolations
+
+#### Extrapolate values LM
+
+```{r}
+
+# research effort in New Zealand
+nz <- pred_trans %>%
+  dplyr::filter(Archip == "New Zealand") %>%
+  dplyr::select(res_eff)
+
+# 10,000 posterior draws for example (60,000 used for study)
+draw <- 10000
+
+# simulate the posterior coefficients
+post_coef <- arm::sim(m1, draw) %>%
+  .@coef %>%
+  as.data.frame()
+
+extrapolate_samps <- function(x, df) {
+
+  # archipelago
+  ar <- pred_trans_log[x,]$Archip
+
+  # data for archipelago
+  nd <- pred_trans_log %>%
+    dplyr::filter(Archip == ar)
+
+  # fossil extinct
+  pre_spp <- nd$ext_spp
+
+  # delta research effort (compared to New Zealand)
+  delta_res <- nz - nd$res_eff
+
+  # for each posterior sample
+  out <- lapply(1:draw, function(b) {
+
+    # total prehistoric extinct
+    tot_spp <- pre_spp + delta_res$res_eff * (post_coef[["res_eff"]][b] + post_coef[["tot_area:res_eff"]][b] * nd$tot_area)
+
+    # transform to natural scale
+    tot_spp <- exp(tot_spp) - 1
+
+    # subtract fossil extinct
+    ext_spp <- tot_spp - (exp(pre_spp) - 1)
+
+  })
+
+  # extract data and tidy
+  out_df <- unlist(out) %>%
+    as.data.frame() %>%
+    setNames(ar)
+
+  # print archipelago name - progress
+  print(ar)
+
+  # return data
+  return(out_df)
+
+}
+
+# extrapolate for each archipelago for each posterior estimate
+pred_dist <- lapply(1:nrow(pred_trans_log), extrapolate_samps)
+
+pred_uni <- dplyr::bind_cols(pred_dist) %>%
+  tidyr::gather(key = "Archip", value = "pred_spp") %>%
+  # drop New Zealand
+  dplyr::filter(Archip != "New Zealand") %>%
+  dplyr::mutate(sample = rep(1:(nrow(.)/(nrow(pred) - 1)), times = (nrow(pred) - 1))) %>%
+  # probability-based rounding
+  dplyr::mutate(pred_spp_r = prob_ro(pred_spp)) %>%
+  dplyr::mutate(pred_spp_r = ifelse(pred_spp_r < 0, 0, pred_spp_r))
+
+```
+
+#### Extrapolate values GLM
+
+```{r}
+
+# simulate the posterior coefficients
+post_coef <- arm::sim(m3, draw) %>%
+  .@coef %>%
+  as.data.frame()
+
+# extrapolate for each archipelago for each posterior estimate
+pred_dist <- lapply(1:nrow(pred_trans_log), extrapolate_samps)
+
+pred_uni_glm <- dplyr::bind_cols(pred_dist) %>%
+  tidyr::gather(key = "Archip", value = "pred_spp") %>%
+  # drop New Zealand
+  dplyr::filter(Archip != "New Zealand") %>%
+  dplyr::mutate(sample = rep(1:(nrow(.)/(nrow(pred) - 1)), times = (nrow(pred) - 1))) %>%
+  # probability-based rounding
+  dplyr::mutate(pred_spp_r = prob_ro(pred_spp)) %>%
+  dplyr::mutate(pred_spp_r = ifelse(pred_spp_r < 0, 0, pred_spp_r))
+
+```
+
+## Upper bound
+
+#### Upper bound model
+
+```{r}
+
+# transformations
+dri <- dri_orig %>% 
+  dplyr::mutate(Elev = log(Elev + 1))
+
+# scales for predictions
+mean_scale <- sapply(dplyr::select(dri, Elev, Temp, Prec, varT, varP), mean)
+sd_scale <- sapply(dplyr::select(dri, Elev, Temp, Prec, varT, varP), sd)
+
+# centered and scaled to zero mean and unit variance
+dri_scale <- dri %>% 
+  dplyr::mutate_at(vars(Elev, Temp, Prec, varT, varP), ~as.numeric(scale(.)))
+
+# non-spatial model 1
+um1 <- glm(all_spp ~ Elev + Temp + Prec + varT + varP, family = poisson, data = dri_scale)
+
+sim_fmp <- DHARMa::simulateResiduals(um1)
+DHARMa::testDispersion(sim_fmp)
+# dispersion = 55, p = 0
+
+# non-spatial model 2
+um2 <- glm(all_spp ~ Elev + Temp + Prec + varT + varP, family = quasipoisson, data = dri_scale)
+
+# RAC model (autocovariate derived from residuals of model with environmental predictors)
+
+xy <- cbind(dri_scale$x, dri_scale$y)
+xyz <- cbind(xy, rep(NA, nrow(xy)))
+
+rast <- raster::rasterFromXYZ(xyz, res = c(113000, 113000), crs = sp::CRS("+proj=eck4 +lon_0=0 +x_0=0 +ellps=WGS84 +units=m +no_defs"))
+
+xy_residuals <- cbind(xy, resid(um2))
+
+rast[raster::cellFromXY(rast, xy_residuals)] <- xy_residuals[,3]
+
+focal_rac_rast <- raster::focal(rast, matrix(1, nrow = 3, ncol = 3), fun = mean, na.rm = TRUE, pad = TRUE)
+
+focal_rac_vect <- raster::extract(focal_rac_rast, xy)
+
+dri_scale_spa <- cbind(dri_scale, focal_rac_vect)
+
+# RAC model
+um2_rac <- glm(all_spp ~ Elev + Temp + Prec + varT + varP + focal_rac_vect, family = quasipoisson, data = dri_scale_spa)
+
+# model summary
+jtools::summ(um2_rac)
+
+# leave-one-out-cross-validation
+
+# loocv function
+loocv_upp <- function(i, df, mod) {
+
+  # training data
+  train <- dplyr::filter(df, rowid != i)
+  # test data
+  test <- dplyr::filter(df, rowid == i)
+  
+  # train model
+  up <- update(mod, data = train)
+  # test model
+  pd <- predict(up, newdata = test, type = "response")
+  
+}
+
+# cv_um2 <- sapply(1:nrow(dri_scale), function(i) loocv_upp(i = i, df = 
+#                                                             dri_scale_spa %>%
+#                   tibble::rownames_to_column("rowid"), mod = um2_rac))
+# 
+# met_um2 <- hydroGOF::gof(cv_um2, dri_scale$all_spp, do.spearman = TRUE)
+
+```
+
+#### Upper bound predictions for focal archipelagos
+
+```{r}
+
+# tidy data
+dri_arch <- dri_arch_orig %>% 
+  dplyr::mutate(Elev = log(Elev + 1)) %>% 
+  # add residuals autocovariate
+  dplyr::mutate(focal_rac_vect = median(focal_rac_vect))
+
+# scale data to match model data
+dri_arch_scale <- scale(dplyr::select(dri_arch, -Archip, -focal_rac_vect), center = mean_scale, scale = sd_scale) %>% 
+  as.data.frame() %>% 
+  # rejoin unscaled columns
+  dplyr::bind_cols(dplyr::select(dri_arch, Archip, focal_rac_vect), .) %>% 
+  # dummy variable needed for model.matrix function
+  dplyr::mutate(all_spp = 0)
+
+# function to get posterior distribution of model parameters
+# code adapted from https://rdrr.io/cran/ciTools/src/R/add_pi_glm.R
+get_sim_response <- function(df, fit, nSims) {
+
+    nPreds <- NROW(df)
+    modmat <- model.matrix(fit, data = df)
+    # model distribution
+    response_distr <- fit$family$family
+    # inverse model link
+    inverselink <- fit$family$linkinv
+    # overdispersion parameter
+    overdisp <- summary(fit)$dispersion
+    # draw the posterior coefficients
+    sims <- arm::sim(fit, n.sims = nSims)
+    # set up matrix
+    sim_response <- matrix(NA, ncol = nSims, nrow = nPreds)
+
+    for (i in 1:nSims){
+        yhat <- inverselink(modmat %*% sims@coef[i,])
+        a <- yhat / (overdisp - 1)
+        sim_response[,i] <- MASS::rnegbin(n = nPreds,
+                                    mu = yhat,
+                                    theta = a)
+    }
+    
+  return(sim_response)
+    
+}
+
+# 10,000 posterior draws for example (150,000 used for study)
+upp_draw <- 10000
+
+# posterior samples
+upp_sim <- get_sim_response(df = dri_arch_scale, fit = um2_rac, nSims = upp_draw)
+
+upp_samp_full <- dplyr::bind_cols(Archip = dri_arch_scale$Archip, as.data.frame(upp_sim)) %>%
+  dplyr::group_by(Archip) %>%
+  dplyr::summarise_if(is.numeric, median) %>%
+  # wide to long
+  tidyr::gather(key = "sample", value = "upp", contains("V"))
+
+# adjust for archipelago area
+upp_samp_area <- upp_samp_full %>%
+  # join archipelago area, fossil bird extinctions, and extant and observed extinct (i.e., extant at 1500 CE) species
+  dplyr::left_join(dplyr::select(pred_orig, Archip, tot_area, ext_spp, ant_spp), by = "Archip") %>%
+  # log transform area - cell area 12,769 km^2
+  dplyr::mutate(gce = log(tot_area / 12769)) %>%
+  # species-area relationship
+  # log(S) = log(c) + zlog(A)
+  dplyr::mutate(upp_area = exp(log(upp) + (0.25 * (gce)))) %>%
+  dplyr::mutate(sample = as.integer(gsub("V", "", sample)))
+
+upp_samp <- upp_samp_area %>% 
+  # total recorded (fossil extinct, observed extinct, extant)
+  dplyr::mutate(rec_spp = ext_spp + ant_spp) %>% 
+  # potential additional species
+  dplyr::mutate(add_spp = upp_area - rec_spp) %>% 
+  # turn negative numbers into zeros
+  dplyr::mutate(add_spp = ifelse(add_spp < 0, 0, add_spp))
+
+```
+
+## Rejection sampling LM
+
+```{r}
+
+# predictions = pred_uni
+# upper bound = upp_samp
+
+comb_df <- pred_uni %>%
+  dplyr::left_join(upp_samp, by = c("Archip", "sample")) %>%
+  # total including undiscovered
+  dplyr::mutate(tot_spp = rec_spp + pred_spp_r)
+
+# upper bound rejection sampling
+comb_upp_rej <- comb_df %>%
+  # rejection
+  dplyr::filter(pred_spp_r <= add_spp)
+
+# percentage rejected
+upp_perc <- comb_upp_rej %>%
+  dplyr::count(Archip) %>%
+  dplyr::mutate(perc = 100 - ((n / (nrow(comb_df)/length(unique(comb_df$Archip)))) * 100))
+
+# upper bound rejection rate
+median(upp_perc$perc)
+# 0.165
+mean(upp_perc$perc)
+# 11.52686
+
+# 100 samples to keep (1,000 samples used in study)
+n_samp <- 100
+
+# tidy rejection sampling
+comb_ex <- comb_upp_rej %>%
+  # 100 estimates to take forward (1,000 samples used in study)
+  dplyr::group_by(Archip) %>%
+  dplyr::sample_n(n_samp) %>%
+  # add run identifier
+  dplyr::mutate(run = 1:n_samp) %>%
+  dplyr::select(Archip, run, pred_spp_r, ext_spp, ant_spp, tot_spp)
+
+# add data for New Zealand
+nz_run <- dplyr::filter(pred_orig, Archip == "New Zealand") %>% 
+  dplyr::mutate(pred_spp_r = 0) %>% 
+  dplyr::mutate(tot_spp = ext_spp + ant_spp + pred_spp_r) %>% 
+  dplyr::slice(rep(1:n(), each = n_samp)) %>% 
+  dplyr::mutate(run = 1:n_samp) %>% 
+  dplyr::select(Archip, run, pred_spp_r, ext_spp, ant_spp, tot_spp)
+
+ex <- dplyr::bind_rows(comb_ex, nz_run)
+
+# # load: ex
+# ex <- readRDS("data/ex.rds") # this is the full dataset from the study
+
+```
+
+## Alternative model of fossil extinct birds
+
+#### Extrapolations for white noise model
+
+```{r}
+
+# extrapolate
+
+scaled_pred <- scaled_pred_orig
+
+# research effort in New Zealand
+nz <- scaled_pred %>%
+  dplyr::filter(Archip == "New Zealand") %>%
+  dplyr::select(res_eff)
+
+# posterior coefficients
+post_coef_wn <- dplyr::filter(mcmc_lin, iteration > 10000000) # remove burn-in
+
+extrapolate_samps_wn <- function(x) {
+
+  # archipelago
+  ar <- scaled_pred[x,]$Archip
+
+  # data for archipelago
+  nd <- scaled_pred %>%
+    dplyr::filter(Archip == ar)
+
+  # recorded prehistoric extinct
+  pre_spp <- (nd$ext_spp - min(scaled_pred$ext_spp)) / diff(range(scaled_pred$ext_spp))
+
+  # delta research effort (compared to New Zealand)
+  delta_res <- nz - nd$res_eff
+
+  # for each posterior sample
+  out <- lapply(1:nrow(post_coef_wn), function(b) {
+
+    # total prehistoric extinct
+    tot_spp <- pre_spp + delta_res$res_eff * (post_coef_wn[["m16"]][b] + post_coef_wn[["m17"]][b] * nd$tot_area)
+
+    # transform to natural scale
+    tot_spp <- tot_spp * diff(range(scaled_pred$ext_spp)) + min(scaled_pred$ext_spp)
+
+    # subtract recorded prehistoric extinct
+    ext_spp <- tot_spp - nd$ext_spp
+
+  })
+
+  # extract data and tidy
+  out_df <- unlist(out) %>%
+    as.data.frame() %>%
+    setNames(ar)
+
+  # print archipelago name - progress
+  print(ar)
+
+  # return data
+  return(out_df)
+
+}
+
+# extrapolate for each archipelago for each posterior estimate
+pred_dist_wn <- lapply(1:nrow(scaled_pred), extrapolate_samps_wn)
+
+pred_uni_wn <- dplyr::bind_cols(pred_dist_wn) %>%
+  tidyr::gather(key = "Archip", value = "pred_spp") %>%
+  # drop New Zealand
+  dplyr::filter(Archip != "New Zealand") %>%
+  dplyr::mutate(sample = rep(1:(nrow(.)/(nrow(scaled_pred) - 1)), times = (nrow(scaled_pred) - 1))) %>%
+  # probability-based rounding
+  dplyr::mutate(pred_spp_r = prob_ro(pred_spp)) %>%
+  dplyr::mutate(pred_spp_r = ifelse(pred_spp_r < 0, 0, pred_spp_r))
+
+```
+
+#### Rejection sampling Gaussian white noise
+
+```{r}
+
+# predictions = pred_uni_wn
+# upper bound = upp_samp
+
+comb_df_wn <- pred_uni_wn %>%
+  # filter to match number of samples to upper bound
+  dplyr::filter(sample %in% c(1:(nrow(upp_samp)/length(unique(upp_samp$Archip))))) %>%
+  dplyr::left_join(upp_samp, by = c("Archip", "sample")) %>%
+  # total including undiscovered
+  dplyr::mutate(tot_spp = rec_spp + pred_spp_r)
+
+# upper bound rejection sampling
+comb_upp_rej_wn <- comb_df_wn %>%
+  # rejection
+  dplyr::filter(pred_spp_r <= add_spp)
+
+# percentage rejected
+upp_perc_wn <- comb_upp_rej_wn %>%
+  dplyr::count(Archip) %>%
+  dplyr::mutate(perc = 100 - ((n / (nrow(comb_df_wn)/length(unique(comb_df_wn$Archip)))) * 100))
+
+# upper bound rejection rate
+median(upp_perc_wn$perc)
+# 0
+mean(upp_perc_wn$perc)
+# 11.05575
+
+# tidy rejection sampling
+comb_ex_wn <- comb_upp_rej_wn %>%
+  # 100 estimates to take forward (1,000 samples used in study)
+  dplyr::group_by(Archip) %>%
+  dplyr::sample_n(n_samp) %>%
+  # add run identifier
+  dplyr::mutate(run = 1:n_samp) %>%
+  dplyr::select(Archip, run, pred_spp_r, ext_spp, ant_spp, tot_spp)
+
+ex_wn <- dplyr::bind_rows(comb_ex_wn, nz_run)
+
+# # load: ex_wn
+# ex_wn <- readRDS("data/ex_wn.rds") # this is the full dataset from the study
+
+```
+
+## Extinction chronology
+
+```{r}
+
+colz <- colz_orig
+
+# add proportional uncertainty to human arrival dates
+colz_uncert <- colz %>% 
+  # only archipelagos
+  dplyr::filter(cont == 0) %>% 
+  # average proportional uncertainty
+  dplyr::mutate(hum_range = hum_low - hum_upp) %>% 
+  dplyr::mutate(hum_uncert = hum_range / hum) %>% 
+  # lower estimate
+  dplyr::mutate(hum_low = ifelse(is.na(hum_low), hum + (mean(.$hum_uncert, na.rm = TRUE) * hum), hum_low)) %>% 
+  # upper estimate
+  dplyr::mutate(hum_upp = ifelse(is.na(hum_upp), hum - (mean(.$hum_uncert, na.rm = TRUE) * hum), hum_upp))
+
+# randomized extinction chronology based on New Zealand (i.e., island)
+
+# rate - half-life of 100 years
+rate <- -log(0.5)/100
+
+# point to truncate exponential - 90% of extinctions within 332 years
+trunc <- -log(1/10)/rate
+
+# truncated exponential
+# 1,000,000 random numbers (100,000,000 used in study)
+exp_trunc <- rexp(1000000, rate = rate)
+exp_trunc <- exp_trunc[exp_trunc < trunc]
+
+# divide into chunks of length 100,000 (10,000,000 used in study)
+m <- 100000
+x <- seq_along(exp_trunc)
+exp_trunc_split <- split(exp_trunc, ceiling(x / m))
+
+# randomized extinction chronology based on North America (i.e., continental)
+
+# continental rate - half-life of 1,000 years
+rate_cont <- -log(0.5)/1000
+
+# point to truncate exponential - 90% of extinctions within 3,322 years
+trunc_cont <- -log(1/10)/rate_cont
+
+# truncated exponential
+# 1,000,000 random numbers (10,000,000 used in study)
+exp_trunc_cont <- rexp(1000000, rate = rate_cont)
+exp_trunc_cont <- exp_trunc_cont[exp_trunc_cont < trunc_cont]
+
+# divide into chunks of length 100,000 (1,000,000 used in study)
+m <- 100000
+x <- seq_along(exp_trunc_cont)
+exp_trunc_cont_split <- split(exp_trunc_cont, ceiling(x/m))
+
+# truncated exponential - Madagascar only
+exp_trunc_cont_mad <- exp_trunc_cont_split[[1]]
+# 75th quantile, 2,000 years, maximum of 1950 for Madagascar
+exp_trunc_cont_mad <- exp_trunc_cont_mad[exp_trunc_cont_mad < -log(2.5/10)/rate_cont]
+
+# human settlement of archipelagos
+ex_da <- ex %>% 
+  dplyr::left_join(colz_uncert, by = "Archip") %>%
+  # human first arrival from uniform distribution of dates - archipelago level
+  dplyr::mutate(hum_unif = purrr::pmap(list(x = hum_upp, y = hum_low), ~ runif(1, .x, .y))) %>% 
+  tidyr::unnest(cols = c(hum_unif)) %>% 
+  dplyr::select(Archip:tot_spp, hum_unif)
+
+# undiscovered
+
+ex_da_un <- ex_da %>% 
+  # create row for every species, keep count column
+  tidyr::uncount(pred_spp_r, .remove = FALSE) %>%
+  # extinction dates from truncated exponential - species level
+  # Madagascar with continental rate extinction chronology
+  dplyr::mutate(pred_date = ifelse(!Archip == "Madagascar", hum_unif - exp_trunc_split[[1]][1:n()], hum_unif - exp_trunc_cont_mad[1:n()])) %>% 
+  # round down to integer, i.e., year
+  dplyr::mutate(pred_date = floor(pred_date)) %>% 
+  # distribution
+  dplyr::mutate(dist = "pre_un")
+
+# fossil - with species names
+
+# fossil extinct birds
+ext_pre_spid <- ext_pre_all %>% 
+  dplyr::left_join(ext_isl, by = "islandName") %>%
+  # convert archipelago names to underscores
+  dplyr::mutate(Archip_10km = gsub(" ", "_", Archip_10km)) %>% 
+  dplyr::group_by(Archip_10km) %>% 
+  dplyr::mutate(sp_id = 1:n())
+
+ex_da_kno <- ex_da %>% 
+  # create row for every species, keep count column
+  tidyr::uncount(ext_spp_all, .remove = FALSE) %>%
+  # extinction dates from truncated exponential - species level
+  dplyr::mutate(pred_date = hum_unif - exp_trunc_split[[2]][1:n()]) %>% 
+  # round down to integer, i.e., year
+  dplyr::mutate(pred_date = floor(pred_date)) %>% 
+  # distribution
+  dplyr::mutate(dist = "pre_kno") %>% 
+  # add species names
+  dplyr::group_by(Archip, run) %>% 
+  dplyr::mutate(sp_id = 1:n()) %>% 
+  dplyr::left_join(ext_pre_spid, by = c("Archip", "sp_id")) %>% 
+  dplyr::select(Archip:commonName)
+
+# combine datasets
+ex_da <- dplyr::bind_rows(ex_da_un, ex_da_kno)
+
+# observed extinct found as fossils - 17 species
+hist_ins_all <- cont_all %>% 
+  # insular species
+  dplyr::filter(ins.cat == "insular") %>% 
+  # prehistoric extinct
+  dplyr::filter(mod_date == 0) %>% 
+  # number of extinct birds per archipelago
+  dplyr::count(Archip_10km) %>% 
+  dplyr::mutate(Archip_10km = gsub(" ", "_", Archip_10km)) 
+
+hist_ins_all <- %>% 
+  # join colonization
+  dplyr::left_join(colz_uncert, by = "Archip_10km") %>% 
+  # replicate dataframe 1000 times
+  dplyr::slice(rep(1:n(), each = 1000)) %>% 
+  # add run identifier
+  dplyr::mutate(run = rep(1:1000, n()/1000)) %>% 
+  # human first arrival from uniform distribution of dates
+  dplyr::mutate(hum_unif = purrr::pmap(list(x = hum_upp, y = hum_low), ~ runif(1, .x, .y))) %>% 
+  tidyr::unnest(cols = c(hum_unif))
+
+hist_ins_spid <- cont_all %>% 
+  # insular species
+  dplyr::filter(ins.cat == "insular") %>% 
+  dplyr::filter(mod_date == 0) %>% 
+  # convert archipelago names to underscores
+  dplyr::mutate(Archip_10km = gsub(" ", "_", Archip_10km)) %>% 
+  dplyr::group_by(Archip_10km) %>% 
+  dplyr::mutate(sp_id = 1:n())
+
+hist_ins <- hist_ins_all %>% 
+  # create row for every species
+  tidyr::uncount(n) %>% 
+  dplyr::mutate(pred_date = hum_unif - exp_trunc_split[[3]][1:n()]) %>% 
+  # round down to integer, i.e., year
+  dplyr::mutate(pred_date = floor(pred_date)) %>% 
+  # distribution
+  dplyr::mutate(dist = "hist_kno") %>% 
+  # add species names
+  dplyr::group_by(Archip, run) %>% 
+  dplyr::mutate(sp_id = 1:n()) %>% 
+  dplyr::left_join(hist_ins_spid, by = c("Archip", "sp_id")) %>% 
+  dplyr::select(Archip, run, hum_unif, pred_date, dist, species, commonName)
+
+# observed extinct birds with dates
+
+dates_hist_ext <- dplyr::select(ext_hist_all, species, commonName, extinctionDate, date_prefix, mod_date, ins.cat, islandName) %>% 
+  # remove 17 observed fossil species
+  dplyr::filter(mod_date == 1) %>% 
+  dplyr::left_join(dplyr::select(ext_isl_orig, islandName, pw13.archip_extra_10km), by = "islandName") %>%
+  dplyr::rename(Archip_10km = pw13.archip_extra_10km) %>% 
+  # get extinction date from string
+  dplyr::rowwise() %>% 
+  dplyr::mutate(ext_numb_low = unlist(stringr::str_match_all(extinctionDate, "[0-9]+"))[1]) %>% 
+  dplyr::mutate(ext_numb_upp = unlist(stringr::str_match_all(extinctionDate, "[0-9]+"))[2]) %>% 
+  dplyr::mutate_at(vars(contains("ext_numb")), as.numeric) %>% 
+  as.data.frame() %>%  
+  # extract year of extinction
+  dplyr::mutate(ext_date_low = ifelse(date_prefix == "BP", (1950 - ext_numb_low), NA)) %>% 
+  dplyr::mutate(ext_date_upp = ifelse(date_prefix == "BP", (1950 - ext_numb_upp), NA)) %>% 
+  dplyr::mutate(ext_date_low = ifelse(date_prefix == "CE", ext_numb_low, ext_date_low)) %>% 
+  dplyr::mutate(ext_date_upp = ifelse(date_prefix == "CE", ext_numb_upp, ext_date_upp)) %>% 
+  dplyr::mutate(ext_date_min = purrr::pmap(list(x = ext_date_low, y = ext_date_upp), ~ min(.x, .y, na.rm = TRUE))) %>% 
+  dplyr::mutate(ext_date_max = purrr::pmap(list(x = ext_date_low, y = ext_date_upp), ~ max(.x, .y, na.rm = TRUE))) %>% 
+  tidyr::unnest(cols = c(ext_date_min, ext_date_max)) %>% 
+  # identify recorded (no uncertainty) extinction dates
+  dplyr::mutate(ext_date = ifelse(is.na(ext_date_upp), ext_date_low, NA)) %>%
+  # unique species
+  dplyr::distinct(species, .keep_all = TRUE) %>% 
+  # assign major archipelagos to multi-archipelago species
+  dplyr::mutate(Archip_10km = ifelse(species == "Aplonis fusca", "Norfolk_Island", Archip_10km)) %>% 
+  dplyr::mutate(Archip_10km = ifelse(species == "Ara tricolor", "Cuba, Cayman Islands, Jamaica", Archip_10km)) %>%   
+  dplyr::mutate(Archip_10km = ifelse(species == "Eclectus infectus", "New Hebrides", Archip_10km)) %>% 
+  dplyr::mutate(Archip_10km = ifelse(species == "Cygnus sumnerensis", "Cuba, Cayman Islands, Jamaica", Archip_10km)) %>% 
+  # continents
+  # Palearctic
+  dplyr::mutate(Archip_10km = ifelse(islandName %in% c("Spain", "Sicily", "Malta", "Asia", "China", "NorthAtlantic", "Europe"), "Palearctic", Archip_10km)) %>% 
+  # Nearctic
+  dplyr::mutate(Archip_10km = ifelse(islandName %in% c("NorthAmerica", "USA", "California", "Mexico", "Labrador", "Guatemala", "Bering"), "Nearctic", Archip_10km)) %>%
+  # Neotropic
+  dplyr::mutate(Archip_10km = ifelse(islandName %in% c("SouthAmerica", "Peru", "Argentina", "Uruguay", "Brazil", "Colombia"), "Neotropic", Archip_10km)) %>%
+  # Australasia
+  dplyr::mutate(Archip_10km = ifelse(islandName %in% c("Australia", "Tasmania"), "Australasia", Archip_10km)) %>%
+  # Indo-Malay
+  dplyr::mutate(Archip_10km = ifelse(islandName %in% c("Hainan"), "Indo-Malay", Archip_10km)) %>% 
+  # convert archipelago names to underscores
+  dplyr::mutate(Archip_10km = gsub(" ", "_", Archip_10km)) %>% 
+  # distribution
+  dplyr::mutate(dist = "hist_kno")
+
+# possibly extinct species listed as extinct - 4 species
+dates_hist_pex <- pex_orig %>% 
+  dplyr::filter(iucn == "EX" | iucn == "EW") %>% 
+  dplyr::mutate(ext_date_min = year_last_recorded) %>% 
+  dplyr::mutate(ext_date_max = year_last_recorded) %>% 
+  dplyr::mutate(ext_date = year_last_recorded) %>% 
+  # distribution
+  dplyr::mutate(dist = "hist_kno") %>% 
+  dplyr::select(species = binomial, commonName = common_name, Archip_10km, ext_date_min, ext_date_max, ext_date, dist)
+
+# combine observed extinct species - 182 species
+dates_hist_ext <- dplyr::bind_rows(dates_hist_ext, dates_hist_pex)
+
+dates_hist_ext_long <- dates_hist_ext %>% 
+  dplyr::select(species, commonName, ext_date_min, ext_date_max, ext_date, Archip_10km, dist) %>% 
+  # replicate dataframe 1000 times
+  dplyr::slice(rep(1:n(), each = 1000)) %>% 
+  # add run identifier
+  dplyr::mutate(run = rep(1:1000, n()/1000)) %>% 
+  # add uncertainty from uniform distribution
+  dplyr::mutate(ext_date = purrr::pmap(list(x = ext_date_min, y = ext_date_max), ~ runif(1, .x, .y))) %>% 
+  tidyr::unnest(cols = c(ext_date)) %>% 
+  # convert to years before present
+  dplyr::mutate(pred_date = floor((1950 - ext_date)))
+
+# observed possibly extinct - 46 species
+hist_pex <- pex_orig %>% 
+  dplyr::filter(iucn == "CR" | iucn == "CR (PE)") %>% 
+  # extinction date in years BP
+  dplyr::mutate(pred_date = 1950 - year_last_recorded) %>% 
+  # average extinction probability
+  dplyr::mutate(prob_ext = 1 - rowMeans(dplyr::select(., p_records, p_threats))) %>% 
+  # distribution
+  dplyr::mutate(dist = "hist_un")
+
+hist_pex_long <- hist_pex %>% 
+  # replicate dataframe 1000 times
+  dplyr::slice(rep(1:n(), each = 1000)) %>% 
+  # add run identifier
+  dplyr::mutate(run = rep(1:1000, n()/1000)) %>% 
+  # binomial probability of extinction
+  dplyr::mutate(pex = purrr::pmap(list(x = prob_ext), ~ rbinom(1, 1, .x))) %>% 
+  tidyr::unnest(cols = c(pex)) %>%
+  dplyr::filter(pex == 1) %>% 
+  dplyr::select(species = binomial, commonName = common_name, Archip_10km, run, pred_date, dist)
+
+# continental prehistoric extinct
+cont_pre <- dplyr::select(cont_all, species, commonName, extinctionDate, date_prefix, prehistoric, ins.cat, islandName, Archip_10km) %>% 
+  # continental species
+  dplyr::filter(ins.cat == "continental") %>% 
+  # prehistoric extinct
+  dplyr::filter(prehistoric == 1)
+
+# all but palearctic and indo-malay
+cont_pre_excl_all <- cont_pre %>% 
+  # excluding palearctic and indo-malay
+  dplyr::filter(!Archip_10km == "Palearctic" & !Archip_10km == "Indo-Malay") %>%
+  # number of extinct birds per archipelago
+  dplyr::count(Archip_10km) %>% 
+  # colonization dates for continents
+  dplyr::left_join(colz_cont_orig, by = c("Archip_10km" = "Archip")) %>%
+  # replicate dataframe 1000 times
+  dplyr::slice(rep(1:n(), each = 1000)) %>% 
+  # add run identifier
+  dplyr::mutate(run = rep(1:1000, n()/1000)) %>% 
+  # human first arrival from uniform distribution of dates - archipelago level
+  dplyr::mutate(hum_unif = purrr::pmap(list(x = hum_upp, y = hum_low), ~ runif(1, .x, .y))) %>% 
+  tidyr::unnest(cols = c(hum_unif)) 
+
+cont_pre_excl_spid <- cont_pre %>% 
+  # excluding palearctic and indo-malay
+  dplyr::filter(!Archip_10km == "Palearctic" & !Archip_10km == "Indo-Malay") %>% 
+  dplyr::group_by(Archip_10km) %>% 
+  dplyr::mutate(sp_id = 1:n())
+
+cont_pre_excl <- cont_pre_excl_all %>% 
+  # create row for every species
+  tidyr::uncount(n) %>% 
+  # extinction dates from truncated exponential - species level
+  dplyr::mutate(pred_date = hum_unif - exp_trunc_cont_split[[2]][1:n()]) %>% 
+  # round down to integer, i.e., year
+  dplyr::mutate(pred_date = floor(pred_date)) %>% 
+  # distribution
+  dplyr::mutate(dist = "pre_kno") %>% 
+  # add species names
+  dplyr::group_by(Archip_10km, run) %>% 
+  dplyr::mutate(sp_id = 1:n()) %>% 
+  dplyr::left_join(cont_pre_excl_spid, by = c("Archip_10km", "sp_id")) %>% 
+  dplyr::select(Archip_10km, run, hum_unif, pred_date, dist, species, commonName)
+
+# palearctic and indo-malay
+# extinction date between maximum age of fossil and 1500 CE from uniform distribution - species level
+cont_pre_pal <- cont_pre %>% 
+  # only palearctic and indo-malay
+  dplyr::filter(Archip_10km == "Palearctic" | Archip_10km == "Indo-Malay") %>% 
+  # get extinction date from string
+  dplyr::rowwise() %>% 
+  dplyr::mutate(ext_numb_low = unlist(stringr::str_match_all(extinctionDate, "[0-9]+"))[1]) %>% 
+  dplyr::mutate(ext_numb_upp = unlist(stringr::str_match_all(extinctionDate, "[0-9]+"))[2]) %>% 
+  dplyr::mutate_at(vars(contains("ext_numb")), as.numeric) %>% 
+  as.data.frame() %>% 
+  # colonization dates for continents
+  dplyr::left_join(colz_cont_orig, by = c("Archip_10km" = "Archip")) %>%
+  # maximum date of fossil
+  dplyr::mutate(ext_date_min = purrr::pmap(list(x = ext_numb_low, y = hum_low), ~ min(.x, .y, na.rm = TRUE))) %>% 
+  tidyr::unnest(cols = c(ext_date_min)) %>% 
+  # replicate dataframe 1000 times
+  dplyr::slice(rep(1:n(), each = 1000)) %>% 
+  # add run identifier
+  dplyr::mutate(run = rep(1:1000, n()/1000)) %>% 
+  # extinction date between maximum age of fossil and 1500 CE from uniform distribution - species level
+  dplyr::mutate(hum_unif = purrr::pmap(list(x = hum_upp, y = ext_date_min), ~ runif(1, .x, .y))) %>% 
+  tidyr::unnest(cols = c(hum_unif)) %>%
+  # round down to integer, i.e., year
+  dplyr::mutate(pred_date = floor(hum_unif)) %>% 
+  # distribution
+  dplyr::mutate(dist = "pre_kno") %>% 
+  # select useful columns
+  dplyr::select(Archip_10km, run, pred_date, dist)
+
+# combine palearctic with other regions
+cont_pre_comb <- dplyr::bind_rows(cont_pre_excl, cont_pre_pal)
+
+# predicted prehistoric unrecorded and recorded extinctions - ~1375 (1207-1564) spp
+ex_da_all <- ex_da %>% 
+  # add historic extinct with extinction dates - 182 spp
+  dplyr::bind_rows(dates_hist_ext_long) %>% 
+  # add historic extinct only recorded from fossils - 17 spp
+  dplyr::bind_rows(hist_ins) %>% 
+  # add possibly extinct species - ~26 spp # dplyr::count(hist_pex_long, run) %>% dplyr::pull(n) %>% mean(.)
+  dplyr::bind_rows(hist_pex_long) %>% 
+  # add prehistoric continental extinctions - 98 spp
+  dplyr::bind_rows(cont_pre_comb) %>% 
+  # BCE/CE
+  dplyr::mutate(pred_date_ce = 1950 - pred_date) %>% 
+  # select useful columns
+  dplyr::select(Archip_10km, run, pred_date, pred_date_ce, dist, species, commonName)
+
+# save: ex_da_all
+# saveRDS(ex_da_all, "data/df_ex_da_all.rds")
+
+# load: ex_da_all
+ex_da_all <- readRDS("data/df_ex_da_all.rds")
+
+# # extinction rate through time
+# ex_da_years_all <- ex_da_all %>%
+#   group_by(run) %>%
+#   # number of extinctions per year - n
+#   dplyr::count(pred_date) %>%
+#   # add in all years in sequence with zero extinctions
+#   tidyr::complete(pred_date = tidyr::full_seq(c(-69, 126000), period = 1), fill = list(n = 0)) %>%
+#   # order by year
+#   dplyr::arrange(-pred_date) %>%
+#   # cumulative extinctions per year
+#   dplyr::mutate(cumsum = cumsum(n)) %>%
+#   # total extinctions per run
+#   dplyr::group_by(run) %>%
+#   dplyr::mutate(tex = sum(n)) %>%
+#   # number alive per year - extant + all extinct - extinct at time T
+#   dplyr::mutate(alive = (10865 + tex) - cumsum) %>%
+#   # extinction rate per year
+#   dplyr::mutate(ex_rate = n / alive) %>%
+#   # moving average of 100 years
+#   dplyr::mutate(ma = zoo::rollmean(ex_rate, k = 100, fill = NA)) %>%
+#   # replace tiny negative numbers
+#   dplyr::mutate(ma = ifelse(ma < 0, 0, ma))
+# 
+# saveRDS(ex_da_years_all, "data/df_ex_da_years_all.rds")
+
+# load: ex_da_years_all
+ex_da_years_all <- readRDS("data/df_ex_da_years_all.rds")
+
+# ex_da_years_sum <- ex_da_years_all %>%
+#   # group by year
+#   group_by(pred_date) %>%
+#   # calculate mean extinction rate across runs per year
+#   dplyr::summarise(ma_mean = mean(ma)) %>%
+#   # BCE/CE
+#   dplyr::mutate(pred_date_ce = 1950 - pred_date)
+# 
+# saveRDS(ex_da_years_sum, "data/df_ex_da_years_sum.rds")
+
+ex_da_years_sum <- readRDS("data/df_ex_da_years_sum.rds") 
+
+# ex_da_years_cum <- ex_da_years_all %>%
+#   # group by year
+#   group_by(pred_date) %>%
+#   # calculate mean extinction rate per year
+#   dplyr::summarise(cum_mean = mean(cumsum)) %>%
+#   # BCE/CE
+#   dplyr::mutate(pred_date_ce = 1950 - pred_date)
+# 
+# saveRDS(ex_da_years_cum, "data/df_ex_da_years_cum.rds")
+
+ex_da_years_cum <- readRDS("data/df_ex_da_years_cum.rds")
+
+# estimated species extinction dates
+sp_date <- ex_da_all %>% 
+  dplyr::group_by(species, commonName, Archip_10km) %>% 
+  dplyr::summarise_at(vars(pred_date), list(~median(.), ~sd(.))) %>% 
+  dplyr::filter(!is.na(species)) %>% 
+  dplyr::mutate(median_ce = 1950 - median)
+
+```
+
+## Maps
+
+```{r}
+
+# recentering code adapted from https://stackoverflow.com/questions/11201997/world-map-with-ggmap
+
+# recenter
+center <- 145
+
+# shift coordinates to recenter worldmap
+worldmap <- ggplot2::map_data("world")
+worldmap$long_recenter <- ifelse(worldmap$long < center - 180, worldmap$long + 360, worldmap$long)
+
+# recenter focal islands
+isl_pnts <- isl
+isl_pnts$long_recenter <- ifelse(isl_pnts$Long < center - 180, isl_pnts$Long + 360, isl_pnts$Long)
+
+arch_pnts <- isl_pnts %>%
+  dplyr::group_by(Archip_10km) %>%
+  dplyr::summarise(mean_long_re = weighted.mean(long_recenter, Area), mean_lat = weighted.mean(Lat, Area)) %>%
+  dplyr::left_join(arch) %>% 
+  dplyr::mutate(Archip_10km_neat = ifelse(Archip_10km_neat == "Sumatran*", "Mentawai*", Archip_10km_neat))
+
+# recenter non-focal islands
+isl_pnts_nf <- readr::read_csv("data/isl_raw.csv")
+isl_pnts_nf$long_recenter <- ifelse(isl_pnts_nf$Long < center - 180, isl_pnts_nf$Long + 360, isl_pnts_nf$Long)
+
+arch_pnts_nf <- isl_pnts_nf %>%
+  dplyr::group_by(Archip_10km) %>%
+  dplyr::summarise(mean_long_re = weighted.mean(long_recenter, Area), mean_lat = weighted.mean(Lat, Area)) %>% 
+  dplyr::bind_rows(data.frame(Archip_10km = c("Palearctic", "Nearctic", "Neotropic", "Australasia", "Indo-Malay", "Afrotropic"), mean_long_re = c(80, 260, 300, 135, 100, 25), mean_lat = c(50, 40, -10, -25, 20, 0))) %>% 
+  dplyr::mutate(Archip_10km_under = gsub(" ", "_", Archip_10km)) %>% 
+  dplyr::filter(!Archip_10km_under %in% arch_pnts$Archip_10km_under) %>% 
+  dplyr::filter(Archip_10km_under %in% ex_da_all$Archip_10km)
+
+# function to regroup split lines and polygons
+# takes dataframe, column with long and unique group variable, returns df with added column named group.regroup
+RegroupElements <- function(df, longcol, idcol){
+  g <- rep(1, length(df[,longcol]))
+  if (diff(range(df[,longcol])) > 300) { # check if longitude within group differs more than 300 deg, ie if element was split
+    d <- df[,longcol] > mean(range(df[,longcol])) # we use the mean to help us separate the extreme values
+    g[!d] <- 1 # some marker for parts that stay in place (we cheat here a little, as we do not take into account concave polygons)
+    g[d] <- 2 # parts that are moved
+  }
+  g <- paste(df[, idcol], g, sep=".") # attach to id to create unique group variable for the dataset
+  df$group.regroup <- g
+  df
+}
+
+# close regrouped polygons
+# takes dataframe, checks if 1st and last longitude value are the same, if not, inserts first as last and reassigns order variable
+ClosePolygons <- function(df, longcol, ordercol){
+  if (df[1,longcol] != df[nrow(df),longcol]) {
+    tmp <- df[1,]
+    df <- rbind(df,tmp)
+  }
+  o <- c(1: nrow(df)) # reassign the order variable
+  df[,ordercol] <- o
+  df
+}
+
+# now regroup
+worldmap.rg <- plyr::ddply(worldmap, .(group), RegroupElements, "long_recenter", "group")
+
+# close polys
+worldmap.cp <- plyr::ddply(worldmap.rg, .(group.regroup), ClosePolygons, "long_recenter", "order") # use the new grouping var
+
+# plotting
+
+# colours
+#col_vector <- randomcoloR::distinctColorPalette(64)
+# col_vector <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+# col_vector2 <- rep(col_vector, 8)
+col_vector <- c("#009E73", "#000000", "#000000", "#000000", "#000000", "#E69F00", "#000000", "#E69F00", "#009E73", "#E69F00", "#E69F00", "#56B4E9", "#56B4E9", "#E69F00", "#000000", "#E69F00", "#009E73", "#56B4E9", "#56B4E9", "#56B4E9", "#D55E00", "#000000", "#56B4E9", "#009E73", "#56B4E9", "#0072B2", "#009E73", "#009E73", "#CC79A7", "#000000", "#009E73", "#0072B2", "#0072B2", "#0072B2", "#0072B2", "#0072B2", "#0072B2", "#56B4E9", "#CC79A7", "#D55E00", "#D55E00", "#D55E00", "#D55E00",  "#CC79A7", "#CC79A7", "#009E73", "#E69F00", "#CC79A7", "#000000", "#CC79A7", "#009E73", "#009E73", "#CC79A7", "#CC79A7", "#56B4E9", "#D55E00", "#000000", "#E69F00", "#56B4E9", "#CC79A7", "#E69F00", "#000000", "#D55E00", "#0072B2", "#009E73",  "#009E73", "#0072B2", "#D55E00", "#D55E00")
+# black "#000000"
+# orange "#E69F00"
+# light blue "#56B4E9"
+# teal "#009E73"
+# yellow "#F0E442" removed
+# blue "#0072B2"
+# dark orange "#D55E00"
+# pink "#CC79A7"
+
+# https://bookdown.org/hneth/ds4psy/D-2-apx-colors-essentials.html
+# Okabe, M., & Ito, K. (2008). Color universal design (CUD): How to make figures and presentations that are friendly to colorblind people. J*Fly: Data Depository for Drosophila Researchers. Retrieved from https://jfly.uni-koeln.de/color/
+
+# archipelagos of the world
+# labelled
+plot_arch <- ggplot(aes(x = long_recenter, y = lat), data = worldmap.cp) +
+  geom_polygon(aes(group = group.regroup), fill = "grey65") +
+  geom_point(data = isl_pnts, aes(x = long_recenter, y = Lat, col = as.factor(Archip_10km)), show.legend = TRUE) +
+  # hide mishapen antarctica
+  scale_y_continuous(limits = c(-60, 85)) +
+  scale_x_continuous(expand = c(0, 0), breaks = c(0, 90, 180, 270), labels = c(paste0("0", "°"), paste0("90", "°E"), paste0("180", "°"), paste0("90", "°W"))) +
+  coord_equal() +
+  scale_color_manual(values = col_vector) +
+  ggrepel::geom_label_repel(data = arch_pnts, aes(x = mean_long_re, y = mean_lat, label = Archip_10km_neat, col = as.factor(Archip_10km)), size = 3, nudge_y = 5, alpha = 0.7) +
+  labs(x = "Longitude", y = "Latitude") +
+  theme(legend.position = "none")
+
+# cowplot::save_plot("outputs/arch_names.png", plot_arch, base_width = 13, base_height = 7, dpi = 300)
+
+arch_full <- arch %>% 
+  dplyr::full_join(dplyr::distinct(ex_da_all, Archip_10km), by = c("Archip_10km_under" = "Archip_10km")) %>% 
+  dplyr::mutate(Archip_10km_neat = c("Andaman*", "Auckland*", "Austral*", "Azores", "Bahamas*", "Balearic*", "Nauru*", "Yucatan*", "Bismarck*", "Bonin*", "Channel*", "Canaries*", "Caroline*", "Chiloe*", "Comoro*", "Cook*", "Sardinia*", "Cuba*", "Cyprus", "Derawan*", "Easter*", "Falkland*", "Fiji*", "Gambier*", "Gilbert*", "Greek*", "Gulf*", "Hawaii", "Hispaniola*", "Izu*", "Kermadec*", "Pohnpei*", "Kurile*", "Maldives*", "Leeward Antilles", "Lesser Sunda*", "Line*", "Louisiade*", "Madagascar", "Maluku*", "Mariana*", "Marquesas", "Marshall*", "Moneron*", "New Caledonia", "Vanuatu", "New Zealand", "Tonga*", "Norfolk*", "Palau*", "Philippines*", "Phoenix*", "Pitcairn*", "Tuvalu*", "Ryukyu*", "Sado*", "Samoan*", "Schouten*", "Society*", "Socotra*", "Solomon*", "Sulawesi", "Mentawai*", "Tuamotu*", "Ulleungdo", "Wake*", "Wallis*", "Windward*", "Zanzibar*", "Bermuda", "Mascarenes*", "Amsterdam*", "Chatham*", "Saint Helena", "Fernando*", "Nearctic", "Australasia", "Tristan*", "Lord Howe*", "Neotropic", "Ascension*", "Outer*", "Palearctic", "Seychelles", "Galapagos*", "Revillagigedos*", "Indo-Malay", "Guadalupe*", "Afrotropic"))
+
+# all regions of the world
+
+arch_full_pnts <- dplyr::bind_rows(arch_pnts, arch_pnts_nf) %>% 
+  dplyr::left_join(arch_full, by = c("Archip_10km_under")) %>% 
+  dplyr::arrange(mean_long_re, mean_lat) %>% 
+  dplyr::mutate(arch_numb = 1:n()) %>% 
+  dplyr::mutate(Archip_10km_neat = as.factor(Archip_10km_neat.y))
+
+# col_vector_full <- c("#009E73", "#000000", "#000000", "#000000", "#000000", "#E69F00", "#000000", "#E69F00", "#009E73", "#E69F00", "#E69F00", "#56B4E9", "#56B4E9", "#E69F00", "#000000", "#E69F00", "#009E73", "#56B4E9", "#56B4E9", "#56B4E9", "#D55E00", "#56B4E9", "#009E73", "#56B4E9", "#0072B2", "#009E73", "#009E73", "#CC79A7", "#000000", "#009E73", "#0072B2", "#0072B2", "#0072B2", "#0072B2", "#0072B2", "#0072B2", "#56B4E9", "#CC79A7", "#D55E00", "#D55E00", "#D55E00", "#D55E00",  "#CC79A7", "#009E73", "#E69F00", "#CC79A7", "#000000", "#CC79A7", "#009E73", "#009E73", "#CC79A7", "#CC79A7", "#56B4E9", "#000000", "#E69F00", "#D55E00", "#56B4E9", "#CC79A7", "#E69F00", "#000000", "#D55E00", "#0072B2", "#009E73",  "#0072B2", "#D55E00", "#D55E00", rep("lightgrey", 21))
+
+# numbered
+plot_region <- ggplot(aes(x = long_recenter, y = lat), data = worldmap.cp) +
+  geom_polygon(aes(group = group.regroup), fill = "grey65") +
+  geom_point(data = arch_full_pnts, aes(x = mean_long_re, y = mean_lat)) +
+  # hide mishapen antarctica
+  scale_y_continuous(limits = c(-60, 85)) +
+  scale_x_continuous(expand = c(0, 0), breaks = c(0, 90, 180, 270), labels = c(paste0("0", "°"), paste0("90", "°E"), paste0("180", "°"), paste0("90", "°W"))) +
+  coord_equal() +
+  ggrepel::geom_text_repel(data = arch_full_pnts, aes(x = mean_long_re, y = mean_lat, label = as.factor(arch_numb)), nudge_y = 7) +
+  scale_discrete_identity(aesthetics = "label", name = "", breaks = as.factor(arch_full_pnts$arch_numb), labels = arch_full_pnts$Archip_10km_neat, guide = "legend") +
+  labs(x = "Longitude", y = "Latitude") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+# cowplot::save_plot("outputs/regions.png", plot_region, base_width = 13, base_height = 10, dpi = 300)
+
+
+# human arrival map
+
+# only observed bird extinctions
+rec_arch <- ex_da_all %>% 
+  dplyr::filter(dist != "pre_un") %>% 
+  dplyr::distinct(Archip_10km)
+
+colz_reg <- arch_full_pnts %>% 
+  dplyr::filter(Archip_10km_under %in% rec_arch$Archip_10km) %>%
+  dplyr::left_join(colz, by = c("Archip_10km.x" = "Archip")) %>% 
+  dplyr::left_join(colz_cont_orig, by = c("Archip_10km_neat" = "Archip")) %>% 
+  dplyr::mutate(colz_low = ifelse(is.na(hum_low.x), hum_low.y, hum_low.x)) %>% 
+  dplyr::mutate(colz_low = ifelse(is.na(colz_low), hum, colz_low)) %>% 
+  # BCE/CE
+  dplyr::mutate(colz_low = 1950 - colz_low) %>% 
+  dplyr::select(Archip_10km_neat, mean_long_re, mean_lat, colz_low) %>% 
+  dplyr::mutate(colz_cat = cut(colz_low, breaks = c(-125000, -9700, 900, 1499, 2000))) %>% 
+  # remove coloured islands
+  dplyr::filter(!Archip_10km_neat %in% c("Madagascar", "Sulawesi", "Lesser Sunda*", "Philippines*", "New Zealand", "Ryukyu*", "Bismarck*", "Solomon*", "Afrotropic", "Australasia", "Indo-Malay", "Nearctic", "Neotropic", "Cuba*", "Hispaniola*"))
+
+wrld_colz <- worldmap.cp %>% 
+  dplyr::filter(!region %in% c("Greenland", "Iceland", "Antarctica", "South Sandwich Islands", "South Georgia", "Heard Island", "French Southern and Antarctic Lands", "Cape Verde", "Sao Tome and Principe", "Cyprus", "Comoros", "Maldives")) %>% 
+  dplyr::filter(!subregion %in% c("Svalbard", "Ellesmere Island", "Ostrov Rudolfa", "Ostrova Belayazemiya", "98", "209", "Axel Heiberg Island", "Ostrov Komsomolets", "Macquarie Island", "Ostrov Shmidta", "Ostrov Greem-Bell", "201", "Ostrov Salisbury", "92", "198", "Ostrov Ushakova", "Zemlya Georga", "Zemlya Vilcheka", "Zemlya Alexsandry", "189", "Ostrov Gallya", "Ostrov Hooker", "182", "Ostrov Mak-Klintoka", "180", "Ostrov Oktyabr'skoy Revolyutsii", "Meighen Island", "Ostrov Sal'm", "175", "Ostrov Pioner", "171", "Ostrov Vize", "Ostrov Bol'shevik", "Ellef Ringnes Island", "Amund Ringnes Island", "Borden Island", "Ostrov Starokadomskogo", "146", "Ostrov Malyy Taymyr", "Mackenzie King Island", "Brock Island", "King Christian Island", "Cornwall Island", "Lougheed Island", "140", "Prince Patrick Island", "Devon Island", "Emerald Isle", "North Kent Island", "Melville Island", "Helena Island", "Bathurst Island", "Cameron Island", "156", "Novaya Zemlya", "131", "Coburg Island", "Eglinton Island", "128", "127", "Cornwallis Island", "126", "Byam Martin Island", "123", "Banks Island", "Somerset Island", "122", "Russell Island", "Prince of Wales Island", "Baffin Island", "Bylot Island", "Stefansson Island", "Victoria Island", "Prescott Island", "Gateshead Island", 	"Ostrov Bennetta", "Ostrov Komsomol'skoy Pravdy", "Ostrov Russkiy", "Ostrov Nordenshelda", "Ostrova Petra", "141", "Ostrov Taymyr", "Ostrov Kotel'nyy", "Ostrov Novaya Sibr'", "135", "Ostrov Vrangelya", "Ostrov Bel'kovskiy", "110", "King William Island", "Jens Munk Island", "Koch Island", "Herschel Island", "106", "Matty Island", "103", "Bray Island", "Harrison Island", "100", "99", "Royal Geographical Society Island", "Jenny Lind Island", "Foley Island", "Melbourne Island", "93", "Prince Charles Island", "Wales Island", "Air Force Island", "Chapman Lewes Island", "87", "86", "85", "90", "Winter Island", "Vansittart Island", "White Island", "Southampton Island", "Mill Island", "Salisbury Island", "Nottingham Island", "Coats Island", "Charles Island", "Big Island", "Mansel Island", "Akimiski Island", "Zanzibar", "Andaman Islands", "Little Andaman Island", "Great Nicobar", "Little Nicobar", "Car Nicobar Island")) %>% 
+  dplyr::filter(!group.regroup %in% c("238.1"))
+
+pnk <- wrld_colz %>% 
+  dplyr::filter(region %in% c("Madagascar", "Cuba", "Dominican Republic", "Jamaica", "Puerto Rico", "Haiti", "Fiji", "New Caledonia", "Vanuatu", "Canary Islands") | subregion %in% c("Corsica", "Sardinia"))
+
+oran <- wrld_colz %>% 
+  dplyr::filter(region %in% c("New Zealand", "Bahamas", "Azores") | subregion %in% c("Hawaii"))
+
+plot_colz <- ggplot(aes(x = long_recenter, y = lat), data = wrld_colz) +
+  geom_polygon(aes(group = group.regroup), fill = "#C1D1D3") +
+  # pink
+  geom_polygon(data = pnk, aes(group = group.regroup), fill = "#F3C7D6") +
+  # orange
+  geom_polygon(data = oran, aes(group = group.regroup), fill = "#D98E6F") +
+  geom_point(data = colz_reg, aes(x = mean_long_re, y = mean_lat, colour = colz_cat), size = 4, shape = 16) +
+  # hide mishapen antarctica
+  scale_y_continuous(limits = c(-60, 85)) +
+  scale_color_manual(values = c("#C1D1D3", "#F3C7D6", "#D98E6F", "#FFD653")) +
+  coord_equal() +
+  theme_void() +
+  theme(legend.position = "none")
+
+# col2rgb("#C1D1D3")
+# col2rgb("#F3C7D6")
+# col2rgb("#D98E6F")
+# col2rgb("#FFD653")
+
+fk_leg <- cowplot::get_legend(ggplot(colz_reg, aes(x = colz_cat, y = 1, fill = colz_cat)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("#C1D1D3", "#F3C7D6", "#D98E6F", "#FFD653"), labels = c("pre-Holocene", "Early Holocene - 900 CE", "900 CE - 1500 CE", "1500 CE - Present")) +
+  labs(fill = "Human arrival") +
+  guides(fill = guide_legend(label.position = "bottom", title.vjust = 0.8)) +
+  theme_classic() +
+  theme(legend.position = "bottom"))
+
+colz_comb <- cowplot::plot_grid(plot_colz, fk_leg, ncol = 1, nrow = 2, rel_heights = c(1, 0.1))
+
+#cowplot::save_plot("outputs/arrival.png", colz_comb, base_width = 12, base_height = 6, dpi = 600)
+
+```
+
+## Plotting
+
+```{r}
+
+# colour scheme
+
+# black "#000000"
+# orange "#E69F00"
+# light blue "#56B4E9"
+# teal "#009E73"
+# yellow "#F0E442" removed
+# blue "#0072B2"
+# dark orange"#D55E00"
+# pink "#CC79A7"
+
+# col2rgb("#CC79A7")
+# col2rgb("#E69F00")
+# col2rgb("#0072B2")
+
+# upper bound rejection sampling
+# ub.png
+
+# upper bound - downsample for visualization
+upp_pr <- upp_samp %>% 
+  dplyr::group_by(Archip_10km) %>% 
+  dplyr::sample_n(1000) %>% 
+  dplyr::mutate(run = 1:1000)
+
+# predictions - downsample for visualization
+pred_pr <- pred_uni %>% 
+  dplyr::group_by(Archip_10km) %>% 
+  dplyr::sample_n(1000) %>% 
+  dplyr::mutate(run = 1:1000)
+  
+# upper bound and predicted downsampled to 1,000
+ub_prep <- dplyr::bind_rows(data.frame(Archip_10km = upp_pr$Archip_10km, spp = upp_pr$add_spp, dist = "upp"), data.frame(Archip_10km = pred_pr$Archip_10km, spp = pred_pr$pred_spp_r, dist = "pred")) %>% 
+  # add neat archipelago names
+  dplyr::left_join(dplyr::select(arch, Archip_10km = Archip_10km_under, Archip_10km_neat)) %>%
+  dplyr::mutate(Archip_10km_neat = ifelse(Archip_10km_neat == "Sumatran*", "Mentawai*", Archip_10km_neat)) %>% 
+  # add rejection percentage
+  dplyr::left_join(upp_perc, by = "Archip_10km") %>% 
+  dplyr::mutate(archip_perc = paste0(Archip_10km_neat, " (", round(perc, 0), "%)")) %>% 
+  dplyr::arrange(desc(archip_perc)) %>% 
+  dplyr::mutate(archip_perc = factor(archip_perc, levels = unique(.$archip_perc)))
+
+# split archipelagos
+full <- length(unique(ub_prep$archip_perc))
+half <- round(full/2)
+max_spp <- 550
+
+# plot predicted and upper bound first half
+ub1 <- ggplot(dplyr::filter(ub_prep, archip_perc %in% levels(ub_prep$archip_perc)[(half + 1):full]), aes(x = spp, y = archip_perc, colour = dist, fill = dist)) +
+  ggridges::geom_density_ridges2(alpha = 0.7, colour = "white", lwd = 0.2) +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(x = "", y = "") +
+  coord_cartesian(xlim = c(0, max_spp)) +
+  scale_fill_manual(values = c("#0072B2", "#CC79A7"), guide = "none") +
+  ggridges::theme_ridges()
+
+# plot predicted and upper bound second half
+ub2 <- ggplot(dplyr::filter(ub_prep, archip_perc %in% levels(ub_prep$archip_perc)[1:half]), aes(x = spp, y = archip_perc, colour = dist, fill = dist)) +
+  ggridges::geom_density_ridges2(alpha = 0.7, colour = "white", lwd = 0.2) +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(x = "", y = "") +
+  coord_cartesian(xlim = c(0, max_spp)) +
+  scale_fill_manual(values = c("#0072B2", "#CC79A7"), labels = c("Extrapolated", "Upper bound")) +
+  ggridges::theme_ridges() +
+  theme(axis.title.x = element_text(hjust = 0.4),
+        legend.title = element_blank())
+
+# get legend
+pr_leg <- cowplot::get_legend(ub2)
+
+# combine plots and legend
+ub_c <- cowplot::plot_grid(ub1, ub2 + theme(legend.position = "none"), pr_leg, ncol = 3, rel_widths = c(1, 1, 0.3))
+
+# add joint x-axis title
+ub_c <- cowplot::ggdraw(add_sub(ub_c, "Bird species", vpadding = grid::unit(0, "lines"), y = 6, x = 0.5, vjust = 4.5)) +
+  ggplot2::theme(plot.background = element_rect(fill = "white", colour = "white"))
+
+# cowplot::save_plot("outputs/ub.png", ub_c, base_width = 12, base_height = 8, dpi = 300)
+
+# fossil extinct predictions across archipelagos
+# un_pred.png
+
+ex_prep <- ex %>% 
+  # remove New Zealand
+  dplyr::filter(Archip_10km != "New_Zealand") %>% 
+  # add neat archipelago names
+  dplyr::left_join(dplyr::select(arch, Archip_10km = Archip_10km_under, Archip_10km_neat))
+
+ex_prep_med <- ex_prep %>% 
+  dplyr::group_by(Archip_10km_neat) %>% 
+  # median predicted undiscovered prehistoric extinct species per archipelago
+  dplyr::summarise(ext_spp_med = median(pred_spp_r)) %>% 
+  dplyr::arrange(ext_spp_med) %>% 
+  dplyr::mutate(Archip_10km_neat = ifelse(Archip_10km_neat == "Sumatran*", "Mentawai*", Archip_10km_neat))
+
+ex_prep <- ex_prep %>% 
+    dplyr::mutate(Archip_10km_neat = ifelse(Archip_10km_neat == "Sumatran*", "Mentawai*", Archip_10km_neat)) %>% 
+  # convert to factor for plotting
+  dplyr::mutate(Archip_10km_neat = factor(Archip_10km_neat, levels = ex_prep_med$Archip_10km_neat))
+  
+# split archipelagos
+full <- length(unique(ex_prep$Archip_10km_neat))
+third <- round(full/3)
+max_spp <- 100
+
+ex1 <- ggplot(dplyr::filter(ex_prep, Archip_10km_neat %in% levels(ex_prep$Archip_10km_neat)[(third + third + 1):full]), aes(x = pred_spp_r, y = Archip_10km_neat)) +
+  # geom_vline(xintercept = 0, colour = "lightgrey") +
+  # geom_vline(xintercept = 20, colour = "lightgrey") +
+  # geom_vline(xintercept = 40, colour = "lightgrey") +
+  # geom_vline(xintercept = 60, colour = "lightgrey") +
+  # geom_vline(xintercept = 80, colour = "lightgrey") +
+  ggridges::geom_density_ridges2(aes(vline_color = ..quantile..), quantile_lines = TRUE, quantiles = 2, alpha = 0.7, colour = "white", fill = "#D55E00", lwd = 0.5, scale = 1, bandwidth = 1, show.legend = FALSE) +
+  geom_text(data = dplyr::filter(ex_prep_med, Archip_10km_neat %in% levels(ex_prep$Archip_10km_neat)[(third + third + 1):full]), aes(label = round(ext_spp_med), x = ext_spp_med, y = Archip_10km_neat), position = position_nudge(x = 10, y = 0.2), size = 4) +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(x = "", y = "") +
+  coord_cartesian(xlim = c(0, max_spp)) +
+  scale_discrete_manual("vline_color", values = c("black", "black")) +
+  ggridges::theme_ridges(grid = FALSE)
+
+ex2 <- ggplot(dplyr::filter(ex_prep, Archip_10km_neat %in% levels(ex_prep$Archip_10km_neat)[(third + 1):(third + third)]), aes(x = pred_spp_r, y = Archip_10km_neat)) +
+  # geom_vline(xintercept = 0, colour = "lightgrey") +
+  # geom_vline(xintercept = 20, colour = "lightgrey") +
+  # geom_vline(xintercept = 40, colour = "lightgrey") +
+  # geom_vline(xintercept = 60, colour = "lightgrey") +
+  # geom_vline(xintercept = 80, colour = "lightgrey") +
+  ggridges::geom_density_ridges2(aes(vline_color = ..quantile..), quantile_lines = TRUE, quantiles = 2, alpha = 0.7, colour = "white", fill = "#D55E00", lwd = 0.5, scale = 1, bandwidth = 1, show.legend = FALSE) +
+  geom_text(data = dplyr::filter(ex_prep_med, Archip_10km_neat %in% levels(ex_prep$Archip_10km_neat)[(third + 1):(third + third)]), aes(label = round(ext_spp_med), x = ext_spp_med, y = Archip_10km_neat), position = position_nudge(x = 10, y = 0.2), size = 4) +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(x = "", y = "") +
+  coord_cartesian(xlim = c(0, max_spp)) +
+  scale_discrete_manual("vline_color", values = c("black", "black")) +
+  ggridges::theme_ridges(grid = FALSE) +
+  theme(axis.title.x = element_text(hjust = 0.4),
+        legend.title = element_blank())
+
+ex3 <- ggplot(dplyr::filter(ex_prep, Archip_10km_neat %in% levels(ex_prep$Archip_10km_neat)[1:third]), aes(x = pred_spp_r, y = Archip_10km_neat)) +
+  # geom_vline(xintercept = 0, colour = "lightgrey") +
+  # geom_vline(xintercept = 20, colour = "lightgrey") +
+  # geom_vline(xintercept = 40, colour = "lightgrey") +
+  # geom_vline(xintercept = 60, colour = "lightgrey") +
+  # geom_vline(xintercept = 80, colour = "lightgrey") +
+  ggridges::geom_density_ridges2(aes(vline_color = ..quantile..), quantile_lines = TRUE, quantiles = 2, alpha = 0.7, colour = "white", fill = "#D55E00", lwd = 0.5, scale = 1, bandwidth = 1, show.legend = FALSE) +
+  geom_text(data = dplyr::filter(ex_prep_med, Archip_10km_neat %in% levels(ex_prep$Archip_10km_neat)[1:third]), aes(label = round(ext_spp_med), x = ext_spp_med, y = Archip_10km_neat), position = position_nudge(x = 10, y = 0.2), size = 4) +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(x = "", y = "") +
+  coord_cartesian(xlim = c(0, max_spp)) +
+  scale_discrete_manual("vline_color", values = c("black", "black")) +
+  ggridges::theme_ridges(grid = FALSE) +
+  theme(axis.title.x = element_text(hjust = 0.4),
+        legend.title = element_blank())
+
+# add joint x-axis title
+ex_c <- cowplot::ggdraw(add_sub(cowplot::plot_grid(ex1, ex2, ex3, nrow = 1, ncol = 3, rel_widths = c(0.9, 0.95, 1)), "Undiscovered extinct birds", vpadding = grid::unit(0, "lines"), y = 6, x = 0.55, vjust = 4.5)) +
+  ggplot2::theme(plot.background = element_rect(fill = "white", colour = "white"))
+
+# cowplot::save_plot("outputs/un_pred.png", ex_c, base_width = 11, base_height = 7, dpi = 300)
+
+## Pacific
+
+# pac <- ex %>% 
+#   dplyr::mutate(pre_spp = pred_spp_r + ext_spp_all) %>% 
+#   dplyr::group_by(Archip_10km) %>% 
+#   # median predicted total species per archipelago
+#   dplyr::summarise(pac_spp = mean(pre_spp)) %>% 
+#   dplyr::filter(Archip_10km %in% c("Austral_Islands", "Banaba_Island_and_Nauru", "Bismarck_Archipelago", "Caroline_Islands", "Cook_Islands", "Easter_Island", "Fiji_Islands", "Gambier_Islands", "Gilbert_Islands", "Hawaii", "Kermadec_Islands", "Kosrae_and_Pohnpei", "Line_Islands", "Louisiade_Archipelago", "Mariana_Islands", "Marquesas", "Marshall_Islands", "New_Caledonia", "New_Hebrides", "Niue_and_Tonga_Islands", "Norfolk_Island", "Phoenix_Islands", "Pitcairn_Islands", "Rotuma_and_Tuvalu_Islands", "Samoan_Islands", "Society_Islands", "Solomon_Islands", "Tuamotu_Archipelago", "Wake_Island", "Wallis_and_Futuna", "New_Zealand", "Palau_Islands_and_Yap"))
+
+pac_arch <- ex_da_all %>%   
+  dplyr::group_by(Archip_10km) %>%
+  dplyr::count(run) %>% 
+  dplyr::group_by(Archip_10km) %>% 
+  dplyr::summarise_at(vars(n), median) %>% 
+  dplyr::filter(Archip_10km %in% c("Antipodes_and_Chatham_Islands", "Austral_Islands", "Banaba_Island_and_Nauru", "Bismarck_Archipelago", "Caroline_Islands", "Cook_Islands", "Easter_Island", "Fiji_Islands", "Gambier_Islands", "Gilbert_Islands", "Hawaii", "Kermadec_Islands", "Kosrae_and_Pohnpei", "Line_Islands", "Lord_Howe_Islands", "Louisiade_Archipelago", "Mariana_Islands", "Marquesas", "Marshall_Islands", "New_Caledonia", "New_Hebrides", "Niue_and_Tonga_Islands", "Norfolk_Island", "Phoenix_Islands", "Pitcairn_Islands", "Rotuma_and_Tuvalu_Islands", "Samoan_Islands", "Society_Islands", "Solomon_Islands", "Tuamotu_Archipelago", "Wake_Island", "Wallis_and_Futuna", "New_Zealand", "Palau_Islands_and_Yap"))
+
+sum(pac_arch$n)
+
+#### swarm plots ####
+
+## swarm with map ##
+
+# total
+
+ex_tot <- ex_da_all %>%
+  dplyr::ungroup() %>% 
+  dplyr::count(run)
+
+ex_tot_hdi <- HDInterval::hdi(ex_tot$n, credMass = 0.95) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  dplyr::mutate(median = median(ex_tot$n))
+
+# ex_tot_hdi_50 <- HDInterval::hdi(ex_tot$n, credMass = 0.50) %>% 
+#   t() %>% 
+#   as.data.frame() %>% 
+#   dplyr::rename(lower_50 = lower, upper_50 = upper)
+#
+# ex_tot_hdi <- dplyr::bind_cols(ex_tot_hdi_95, ex_tot_hdi_50)
+
+swarm_tot <- ggplot(ex_tot, aes(x = 1, y = n)) +
+  #geom_half_point_panel(aes(x = 1.01), transformation = position_jitter(width = 1), side = "l", alpha = 0.4, colour = "darkgrey") +
+  gghalves::geom_half_violin(side = "r", fill = "grey", colour = "grey") +
+  geom_linerange(aes(ymin = ex_tot_hdi$lower, ymax = ex_tot_hdi$upper), colour = "grey30", lwd = 0.8) +
+  #geom_linerange(aes(ymin = ex_tot_hdi$lower_50, ymax = ex_tot_hdi$upper_50), colour = "grey15", lwd = 0.9) +
+  geom_point(aes(y = ex_tot_hdi$median), size = 1.5) +
+  scale_y_continuous(limits = c(0, (1.05 * max(ex_tot$n))), expand = c(0, 0)) +
+  scale_x_continuous(breaks = 1, labels = "Total") +
+  labs(y = "Extinct birds") +
+  theme(axis.title.x = element_blank())
+
+# bar chart
+
+# historic
+hist_all <- ex_da_all %>% 
+  dplyr::filter(dist == "hist_kno" | dist == "hist_un") %>% 
+  dplyr::ungroup() %>% 
+  dplyr::count(run) %>% 
+  dplyr::mutate(grp = "hist")
+
+hist_cross_all <- HDInterval::hdi(hist_all$n, credMass = 0.95) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  dplyr::mutate(median = median(hist_all$n)) %>% 
+  dplyr::mutate(grp = "hist")
+
+# recorded prehistoric
+pre_kno_all <- ex_da_all %>% 
+  dplyr::filter(dist == "pre_kno") %>% 
+  dplyr::ungroup() %>% 
+  dplyr::count(run) %>% 
+  dplyr::mutate(grp = "pre_kno")
+
+pre_kno_cross_all <- HDInterval::hdi(pre_kno_all$n, credMass = 0.95) %>%
+  t() %>% 
+  as.data.frame() %>% 
+  dplyr::mutate(median = median(pre_kno_all$n)) %>% 
+  dplyr::mutate(grp = "pre_kno")
+
+# undiscovered prehistoric
+pre_un_all <- ex_da_all %>% 
+  dplyr::filter(dist == "pre_un") %>% 
+  dplyr::ungroup() %>% 
+  dplyr::count(run) %>% 
+  dplyr::mutate(grp = "pre_un")
+
+pre_un_cross_all <- HDInterval::hdi(pre_un_all$n, credMass = 0.95) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  dplyr::mutate(median = median(pre_un_all$n)) %>% 
+  dplyr::mutate(grp = "pre_un")
+
+all_bar <- dplyr::bind_rows(hist_cross_all, pre_kno_cross_all, pre_un_cross_all) %>% 
+  dplyr::mutate_at(vars(c("lower", "upper")), ~ifelse(grp == "pre_kno", NA, .)) %>% 
+  dplyr::mutate(grp = ifelse(grp == "hist", "Observed", 
+                              ifelse(grp == "pre_kno", "Fossil", 
+                                     ifelse(grp == "pre_un", "Undiscovered", NA)))) %>% 
+  dplyr::mutate(grp = factor(grp, levels = c("Observed", "Fossil", "Undiscovered")))
+
+swarm_bar <- ggplot(all_bar, aes(x = grp, y = median, fill = grp)) +
+  geom_bar(stat = "identity") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.04) +
+  scale_y_continuous(limits = c(0, (1.05 * max(ex_tot$n))), expand = c(0, 0)) +
+  scale_fill_manual(values = c("#CC79A7", "#0072B2", "#D55E00")) +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+# combine total and bar
+swarm_tot_bar <- cowplot::plot_grid(swarm_tot, swarm_bar, rel_widths = c(0.5, 1))
+
+# map
+
+# observed
+hist_all_pie <- ex_da_all %>%   
+  dplyr::filter(dist == "hist_kno" | dist == "hist_un") %>% 
+  dplyr::group_by(Archip_10km) %>%
+  dplyr::count(run) %>% 
+  dplyr::group_by(Archip_10km) %>% 
+  dplyr::summarise_at(vars(n), median) %>% 
+  dplyr::rename(hist = n)
+                      
+# fossil
+pre_kno_all_pie <- ex_da_all %>% 
+  dplyr::filter(dist == "pre_kno") %>% 
+  dplyr::group_by(Archip_10km) %>%
+  dplyr::count(run) %>% 
+  dplyr::group_by(Archip_10km) %>% 
+  dplyr::summarise_at(vars(n), median) %>% 
+  dplyr::rename(pre_kno = n)
+
+# undiscovered
+pre_un_all_pie <- ex_da_all %>%
+  dplyr::filter(dist == "pre_un") %>% 
+  dplyr::group_by(Archip_10km) %>%
+  dplyr::count(run) %>% 
+  dplyr::group_by(Archip_10km) %>% 
+  dplyr::summarise_at(vars(n), median) %>% 
+  dplyr::rename(pre_un = n)
+
+all_pie <- dplyr::full_join(hist_all_pie, pre_kno_all_pie, by = "Archip_10km") %>% 
+  dplyr::full_join(pre_un_all_pie, by = "Archip_10km")
+
+arch_pnts_swarm <- arch_pnts %>% 
+  bind_rows(arch_pnts_nf) %>% 
+  dplyr::left_join(all_pie, by = c("Archip_10km_under" = "Archip_10km")) %>% 
+  tidyr::replace_na(list(hist = 0, pre_kno = 0, pre_un = 0)) %>% 
+  dplyr::mutate(tot = hist + pre_kno + pre_un) %>% 
+  dplyr::mutate(tot_a = sqrt(tot/pi))
+
+swarm_map <- ggplot(aes(x = long_recenter, y = lat), data = worldmap.cp) +
+  geom_polygon(aes(group = group.regroup), fill = "grey65") +
+  scatterpie::geom_scatterpie(data = arch_pnts_swarm, aes(x = mean_long_re, y = mean_lat, group = Archip_10km_neat, r = tot_a), cols = colnames(arch_pnts_swarm)[6:8], alpha = 0.8, colour = NA) +  
+  coord_equal() +
+  # hide mishapen antarctica
+  scale_x_continuous(expand = c(0, 0), breaks = c(0, 90, 180, 270), labels = c(paste0("0", "°"), paste0("90", "°E"), paste0("180", "°"), paste0("90", "°W"))) +
+  scale_y_continuous(limits = c(-60, 85)) +
+  scale_fill_manual(labels = c("Historic", "Recorded prehistoric", "Undiscovered prehistoric"), values = c("#CC79A7", "#0072B2", "#D55E00")) +
+  labs(x = "Longitude", y = "Latitude", size = "Undiscovered prehistoric extinct birds") +
+  scatterpie::geom_scatterpie_legend(dplyr::filter(arch_pnts_swarm, tot > 0)$tot_a, n = 3, x = 250, y = -50, labeller = function(x) signif(pi * x ^ 2, 1)) +
+  theme(legend.position = "none")
+
+# combine total, bar and map
+swarm_pie <- cowplot::plot_grid(swarm_tot_bar, swarm_map, nrow = 2, ncol = 1, labels = "auto") +
+  ggplot2::theme(plot.background = element_rect(fill = "white", colour = "white"))
+
+# cowplot::save_plot("outputs/swarm_pie.png", swarm_pie, base_width = 10, base_height = 10, dpi = 600)
+
+## overall stats ##
+
+# proportion extinct
+ex_tot_hdi$median / (10865 + ex_tot_hdi$median)
+ex_tot_hdi$lower / (10865 + ex_tot_hdi$lower)
+ex_tot_hdi$upper / (10865 + ex_tot_hdi$upper)
+
+# maximum extinction rate
+ex_da_years_sum[which.max(ex_da_years_sum$ma_mean),]
+
+# minor peaks
+dplyr::filter(ex_da_years_sum, pred_date_ce <0)[which.max(dplyr::filter(ex_da_years_sum, pred_date_ce <0)$ma_mean),]
+
+dplyr::filter(ex_da_years_sum, pred_date_ce >1700)[which.max(dplyr::filter(ex_da_years_sum, pred_date_ce >1700)$ma_mean),]
+
+# percent unrecorded
+(pre_un_cross_all$median / ex_tot_hdi$median) * 100
+(pre_un_cross_all$lower / ex_tot_hdi$lower) * 100
+(pre_un_cross_all$upper / ex_tot_hdi$upper) * 100
+
+# human impact
+ex_tot_hdi$median / (hist_cross_all$median + pre_kno_cross_all$median)
+
+## extinction chronology
+
+#zoom <- 10000
+
+# extinction rate plots
+
+# 10^x function from: https://stackoverflow.com/questions/11610377/how-do-i-change-the-formatting-of-numbers-on-an-axis-with-ggplot
+fancy_scientific <- function(l) {
+  # turn in to character string in scientific notation
+  l <- format(l, scientific = TRUE)
+  # leave zero as 0
+  l <- gsub("0e\\+00","0",l)
+  # quote the part before the exponent to keep all the digits
+  l <- gsub("^(.*)e", "'\\1'e", l)
+  # turn the 'e+' into plotmath format
+  l <- gsub("e", "%*%10^", l)
+  # return this as an expression
+  parse(text = l)
+}
+
+# pleistocene wiggle
+
+ski <- ggplot(ex_da_years_cum, aes(x = pred_date_ce, y = cum_mean)) +
+  geom_vline(xintercept = -5000, colour = "lightgrey", lwd = 1.5, lty = 3) +
+  geom_path(lwd = 1.5, show.legend = FALSE) +
+  scale_x_continuous(limits = c(min(ex_da_years_cum$pred_date_ce) - 1000, max(ex_da_years_cum$pred_date_ce)), breaks = c(-120000, -80000, -40000, 0), expand = c(0, 0), name = "Year") +
+  scale_y_continuous(expand = c(0, 0), breaks = c(0, 200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800), labels = comma, name = "Cumulative bird extinctions")
+
+# labels of major archipelagos
+ar_lab <- data.frame(Archip_10km_neat = c("Solomon*", "Multiple", "Caribbean"), pred_date_ce = c(-26603, -10020, -2289), ma_mean = c(3.214294e-06, 5.394345e-06, 4.503552e-06)) 
+
+# past1 <- 5000
+# past2 <- 2000
+# 
+# test1 <- dplyr::filter(ex_da_years, pred_date_ce > -past1 & pred_date_ce < -past2)
+# test2 <- dplyr::filter(ex_da_all, pred_date_ce > -past1 & pred_date_ce < -past2) %>%
+#   dplyr::count(Archip_10km, sort = TRUE) %>%
+#   dplyr::mutate(count = (n/1000)/(past1 - past2))
+
+wiggle_pleis <- ggplot(ex_da_years_sum, aes(x = pred_date_ce, y = ma_mean)) +
+  geom_vline(xintercept = -5000, colour = "lightgrey", lwd = 1.5, lty = 3) +
+  geom_path(lwd = 1.5, show.legend = FALSE) +
+  #ggrepel::geom_text_repel(data = ar_lab, aes(label = Archip_10km_neat), nudge_x = c(rep(-15000, 2), -10000), nudge_y = 1e-05) +
+  #ggtitle("Bird extinction rate since the Late Pleistocene") +
+  scale_x_continuous(limits = c(min(ex_da_years_sum$pred_date_ce) - 1000, (max(ex_da_years_sum$pred_date_ce)) * 1.1), breaks = c(-120000, -100000, -80000, -60000, -40000, -20000, 0), expand = c(0, 0), name = "Year") +
+  scale_y_continuous(limits = c(0, (max(ex_da_years_sum$ma_mean, na.rm = TRUE) * 1.1)), expand = c(0, 0), labels = fancy_scientific, name = "Bird extinction rate (extinctions/species/year)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+wig2 <- ggdraw() +
+  draw_plot(wiggle_pleis) +
+  draw_plot(ski, x = 0.2, y = 0.37, width = 0.45, height = 0.45) +
+  ggplot2::theme(plot.background = element_rect(fill = "white", colour = "white"))
+
+#cowplot::save_plot("outputs/wiggle_pleis.png", wig2, base_width = 10, base_height = 10, dpi = 300)
+
+# wiggle with stacks and map
+
+ski_zoom <- ggplot(ex_da_years_cum, aes(x = pred_date_ce, y = cum_mean)) +
+  geom_path(lwd = 1.5, show.legend = FALSE) +
+  scale_x_continuous(limits = c(-5000, (max(ex_da_years_sum$pred_date_ce) * 1.1)), breaks = c(-4000, -2000, 0, 2000), expand = c(0, 0), name = "Year") +
+  scale_y_continuous(expand = c(0, 0), breaks = c(0, 200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800), labels = comma, name = "Cumulative bird extinctions")
+
+wiggle_zoom <- ggplot(ex_da_years_sum, aes(x = pred_date_ce, y = ma_mean)) +
+  #geom_vline(xintercept = 1500, colour = "darkgrey", lwd = 1, lty = 2) +
+  geom_path(lwd = 1.5, show.legend = FALSE) +
+  #ggtitle("Bird extinction rate over the last ~10,000 years") +
+  # EX1
+  geom_segment(aes(x = -1750, y = (4.595691e-05 + 4e-06), xend = 447, yend = (4.595691e-05 + 4e-06)), lwd = 1.1, colour = "#CC79A7") +
+  geom_segment(aes(x = -1750, y = (4.595691e-05 + 5e-06), xend = -1750, yend = (4.595691e-05 + 3e-06)), lwd = 1.1, colour = "#CC79A7") +
+  geom_segment(aes(x = 447, y = (4.595691e-05 + 5e-06), xend = 447, yend = (4.595691e-05 + 3e-06)), lwd = 1.1, colour = "#CC79A7") +
+  geom_text(aes(x = -652, y = (4.595691e-05 + 8e-06), label = "EX1"), colour = "#CC79A7") +
+  # EX2
+  geom_segment(aes(x = 447, y = (0.0001566098 + 4e-06), xend = 1742, yend = (0.0001566098 + 4e-06)), lwd = 1.1, colour = "#D55E00") +
+  geom_segment(aes(x = 447, y = (0.0001566098 + 5e-06), xend = 447, yend = (0.0001566098 + 3e-06)), lwd = 1.1, colour = "#D55E00") +
+  geom_segment(aes(x = 1742, y = (0.0001566098 + 5e-06), xend = 1742, yend = (0.0001566098 + 3e-06)), lwd = 1.1, colour = "#D55E00") +
+  geom_text(aes(x = 1095, y = (0.0001566098 + 8e-06), label = "EX2"), colour = "#D55E00") +
+  # EX3
+  geom_segment(aes(x = 1742, y = (8.346472e-05 + 4e-06), xend = 2019, yend = (8.346472e-05 + 4e-06)), lwd = 1.1, colour = "#0072B2") +
+  geom_segment(aes(x = 1742, y = (8.346472e-05 + 5e-06), xend = 1742, yend = (8.346472e-05 + 3e-06)), lwd = 1.1, colour = "#0072B2") +
+  geom_segment(aes(x = 2019, y = (8.346472e-05 + 5e-06), xend = 2019, yend = (8.346472e-05 + 3e-06)), lwd = 1.1, colour = "#0072B2") +
+  geom_text(aes(x = 1881, y = (8.346472e-05 + 8e-06), label = "EX3"), colour = "#0072B2") +
+  scale_x_continuous(limits = c(-5000, (max(ex_da_years_sum$pred_date_ce) * 1.1)), breaks = c(-5000, -4000, -3000, -2000, -1000, 0, 1000, 2000), expand = c(0, 0), name = "Year") +
+  scale_y_continuous(limits = c(0, (max(ex_da_years_sum$ma_mean, na.rm = TRUE) * 1.1)), expand = c(0, 0), labels = fancy_scientific, name = "Bird extinction rate (extinctions/species/year)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+wig_c <- ggdraw() +
+  draw_plot(wiggle_zoom) +
+  draw_plot(ski_zoom, x = 0.2, y = 0.4, width = 0.4, height = 0.4)
+
+# cowplot::save_plot("outputs/wiggle_up.png", wig_c, base_width = 10, base_height = 10, dpi = 300)
+
+# to find peaks
+test <- dplyr::filter(ex_da_years_sum, pred_date_ce > 0 & pred_date_ce < 1000)
+
+# maps
+
+b1 <- ex_da_all %>%
+  dplyr::filter(pred_date_ce > -1750 & pred_date_ce < 447) %>%
+  dplyr::count(Archip_10km, sort = TRUE) %>%
+  dplyr::mutate(count = (n/1000)/(447 - -1750))
+
+b2 <- ex_da_all %>%
+  dplyr::filter(pred_date_ce > 447 & pred_date_ce < 1742) %>%
+  dplyr::count(Archip_10km, sort = TRUE) %>%
+  dplyr::mutate(count = (n/1000)/(1742 - 447))
+
+b3 <- ex_da_all %>%
+  dplyr::filter(pred_date_ce > 1742) %>%
+  dplyr::count(Archip_10km, sort = TRUE) %>%
+  dplyr::mutate(count = (n/1000)/ (2019 - 1742))
+
+b_all <- rbind(b1, b2, b3)
+
+ap_b1 <- arch_pnts %>%
+  dplyr::bind_rows(arch_pnts_nf) %>%
+  dplyr::left_join(arch_full, by = "Archip_10km_under") %>%
+  dplyr::right_join(b1, by = c("Archip_10km_under" = "Archip_10km")) %>%
+  dplyr::mutate(rank = rank(desc(count), ties.method = "first")) %>%
+  dplyr::mutate(Archip_neat = ifelse(rank < 6, Archip_10km_neat.y, "")) %>%
+  dplyr::mutate(rank = ifelse(rank < 6, rank, "")) %>% 
+  dplyr::arrange(rank) %>% 
+  dplyr::mutate(Archip_neat = factor(Archip_neat, levels = unique(.$Archip_neat)))
+
+ap_b2 <- arch_pnts %>%
+  dplyr::bind_rows(arch_pnts_nf) %>%
+  dplyr::left_join(arch_full, by = "Archip_10km_under") %>%
+  dplyr::right_join(b2, by = c("Archip_10km_under" = "Archip_10km")) %>%
+  dplyr::mutate(rank = rank(desc(count), ties.method = "first")) %>%
+  dplyr::mutate(Archip_neat = ifelse(rank < 6, Archip_10km_neat.y, "")) %>%
+  dplyr::mutate(rank = ifelse(rank < 6, rank, "")) %>% 
+  dplyr::arrange(rank) %>% 
+  dplyr::mutate(Archip_neat = factor(Archip_neat, levels = unique(.$Archip_neat)))
+
+ap_b3 <- arch_pnts %>%
+  dplyr::bind_rows(arch_pnts_nf) %>%
+  dplyr::left_join(arch_full, by = "Archip_10km_under") %>%
+  dplyr::right_join(b3, by = c("Archip_10km_under" = "Archip_10km")) %>%
+  dplyr::mutate(rank = rank(desc(count), ties.method = "first")) %>%
+  dplyr::mutate(Archip_neat = ifelse(rank < 6, Archip_10km_neat.y, "")) %>%
+  dplyr::mutate(rank = ifelse(rank < 6, rank, "")) %>% 
+  dplyr::arrange(rank) %>% 
+  dplyr::mutate(Archip_neat = factor(Archip_neat, levels = unique(.$Archip_neat)))
+
+b1_map <- ggplot(aes(x = long_recenter, y = lat), data = worldmap.cp) +
+  geom_polygon(aes(group = group.regroup), fill = "grey65") +
+  geom_point(data = ap_b1, aes(x = mean_long_re, y = mean_lat, size = count), colour = "#CC79A7", alpha = 0.7, show.legend = FALSE) +
+  geom_text(data = ap_b1, aes(x = mean_long_re, y = mean_lat, label = rank), size = 4) +
+  labs(title = "Extinctions 1750 BCE - 447 CE", y = "EX1", x = "") +
+  scale_discrete_identity(aesthetics = "label", name = "", breaks = as.factor(ap_b1$rank), labels = ap_b1$Archip_neat, guide = "legend") +
+  scale_y_continuous(limits = c(-60, 85)) +
+  scale_size(range = c(1, 10)) +
+  coord_equal() +
+  theme(legend.title = element_blank(),
+        axis.title.y = element_text(colour = "#CC79A7", angle = 0, vjust = 0.5),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+
+b2_map <- ggplot(aes(x = long_recenter, y = lat), data = worldmap.cp) +
+  geom_polygon(aes(group = group.regroup), fill = "grey65") +
+  geom_point(data = ap_b2, aes(x = mean_long_re, y = mean_lat, size = count), colour = "#D55E00", alpha = 0.7, show.legend = FALSE) +
+  geom_text(data = ap_b2, aes(x = mean_long_re, y = mean_lat, label = rank), size = 4) +
+  labs(title = "Extinctions 447 CE - 1742 CE", y = "EX2", x = "") +
+  scale_discrete_identity(aesthetics = "label", name = "", breaks = as.factor(ap_b2$rank), labels = ap_b2$Archip_neat, guide = "legend") +
+  scale_y_continuous(limits = c(-60, 85)) +
+  scale_size(range = c(1, 10)) +
+  coord_equal()  +
+  theme(legend.title = element_blank(),
+        axis.title.y = element_text(colour = "#D55E00", angle = 0, vjust = 0.5),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+
+b3_map <- ggplot(aes(x = long_recenter, y = lat), data = worldmap.cp) +
+  geom_polygon(aes(group = group.regroup), fill = "grey65") +
+  geom_point(data = ap_b3, aes(x = mean_long_re, y = mean_lat, size = count), colour = "#0072B2", alpha = 0.7, show.legend = FALSE) +
+  geom_text(data = ap_b3, aes(x = mean_long_re, y = mean_lat, label = rank), size = 4) +
+  labs(title = "Extinctions 1742 CE - 2019 CE", y = "EX3", x = "") +
+  scale_discrete_identity(aesthetics = "label", name = "", breaks = as.factor(ap_b3$rank), labels = ap_b3$Archip_neat, guide = "legend") +
+  scale_y_continuous(limits = c(-60, 85)) +
+  scale_size(range = c(1, 10)) +
+  coord_equal()  +
+  theme(legend.title = element_blank(),
+        axis.title.y = element_text(colour = "#0072B2", angle = 0, vjust = 0.5),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+
+# wig_window <- cowplot::plot_grid(wig_c, b1_map, b2_map, b3_map, nrow = 4, ncol = 1, rel_heights = c(1, 0.4, 0.4, 0.4), labels = "auto")  +
+#   ggplot2::theme(plot.background = element_rect(fill = "white", colour = "white"))
+# 
+# #cowplot::save_plot("outputs/wiggle_new.png", wig_window, base_width = 10, base_height = 18, dpi = 300, bg = "white")
+
+wig_window <- cowplot::plot_grid(wig_c,  cowplot::plot_grid(b1_map, b2_map, b3_map, nrow = 3, labels = c("b", "c", "d")), nrow = 1, ncol = 2, labels = c("a", "")) +
+  ggplot2::theme(plot.background = element_rect(fill = "white", colour = "white"))
+
+cowplot::save_plot("outputs/wiggle_new.png", wig_window, base_width = 18, base_height = 10, dpi = 600, bg = "white")
+
+
+
+
+
+
+
+# strip plot
+
+align_legend <- function(p, hjust = 0.5)
+{
+  # extract legend
+  g <- cowplot::plot_to_gtable(p)
+  grobs <- g$grobs
+  legend_index <- which(sapply(grobs, function(x) x$name) == "guide-box")
+  legend <- grobs[[legend_index]]
+
+  # extract guides table
+  guides_index <- which(sapply(legend$grobs, function(x) x$name) == "layout")
+
+  # there can be multiple guides within one legend box  
+  for (gi in guides_index) {
+    guides <- legend$grobs[[gi]]
+
+    # add extra column for spacing
+    # guides$width[5] is the extra spacing from the end of the legend text
+    # to the end of the legend title. If we instead distribute it by `hjust:(1-hjust)` on
+    # both sides, we get an aligned legend
+    spacing <- guides$width[5]
+    guides <- gtable::gtable_add_cols(guides, hjust*spacing, 1)
+    guides$widths[6] <- (1-hjust)*spacing
+    title_index <- guides$layout$name == "title"
+    guides$layout$l[title_index] <- 2
+
+    # reconstruct guides and write back
+    legend$grobs[[gi]] <- guides
+  }
+
+  # reconstruct legend and write back
+  g$grobs[[legend_index]] <- legend
+  g
+}
+
+ex_per_year <- ex_da_all %>% 
+  # number of extinctions per year - n
+  dplyr::count(pred_date_ce) %>% 
+  dplyr::filter(pred_date_ce > -2000) %>% 
+  # add in all years with zero extinctions
+  tidyr::complete(pred_date_ce = tidyr::full_seq(c(-2000, 2019), period = 1), fill = list(n = 0)) %>% 
+  dplyr::mutate(count = n/1000) %>% 
+  dplyr::mutate(count_cut = cut(pred_date_ce, breaks = c(seq(-2001, 2019, by = 200)))) 
+
+ex_per_year_summarise <- ex_per_year %>% 
+  dplyr::group_by(count_cut) %>% 
+  dplyr::summarise_at(vars(count), ~mean(., na.rm = TRUE))
+
+ex_per_year <- ex_per_year %>% 
+  dplyr::left_join(ex_per_year_summarise, by = "count_cut") %>% 
+  dplyr::mutate(y = 1)
+
+strip2 <- ggplot(data = ex_per_year, aes(x = pred_date_ce, y = y)) +
+  geom_tile(aes(fill = count.y)) +
+  scale_x_continuous(breaks = c(-2000, -1600, -1200, -800, -400, 0, 400, 800, 1200, 1600, 2000)) +
+  labs(x = "Year", y = "", fill = "Bird extinctions/year") +
+  viridis::scale_fill_viridis(option = "inferno") +
+  theme_minimal() +
+  theme(axis.text.y = element_blank(),
+        axis.line.y = element_blank(),
+        legend.title.align = 0, 
+        panel.grid.major = element_blank(),
+        axis.text.x = element_text(vjust = 3),
+        panel.grid.minor = element_blank())
+
+strip2 <- ggdraw(align_legend(strip2)) # centered legend title
+
+#cowplot::save_plot("~/R/R_Projects/total_div/outputs/strip2.png", strip2, base_width = 10, base_height = 2, dpi = 300)
+
+```
+
+#### Single estimates
+
+```{r}
+
+sest <- dplyr::filter(ex_da_years_all, run %in% 1:10) %>% 
+  # BCE/CE
+  dplyr::mutate(pred_date_ce = 1950 - pred_date)
+
+sest_pleist <- ggplot(sest, aes(x = pred_date_ce, y = ma)) +
+  geom_path(lwd = 1.5, show.legend = FALSE) +
+  ggtitle("Bird extinction rate since the Late Pleistocene") +
+  scale_x_continuous(limits = c(min(sest$pred_date_ce) - 1000, (max(sest$pred_date_ce)) * 1.1), breaks = c(-120000, -100000, -80000, -60000, -40000, -20000, 0), expand = c(0, 0), name = "Year") +
+  scale_y_continuous(limits = c(0, (max(sest$ma, na.rm = TRUE) * 1.1)), breaks = c(1e-04, 2e-04), expand = c(0, 0), labels = fancy_scientific, name = "Bird extinction rate (extinctions/species/year)") +
+  facet_wrap(~ run, nrow = 10) +
+  theme(plot.title = element_text(hjust = 0.5),
+        strip.background = element_blank(),
+        strip.text = element_blank(),
+        axis.title.y = element_text(margin = margin(t = 0, r = 20, b = 0, l = 0)))
+
+sest_zoom <- ggplot(sest, aes(x = pred_date_ce, y = ma)) +
+  geom_path(lwd = 1.5, show.legend = FALSE) +
+  ggtitle("Bird extinction rate over the last ~7,000 years") +
+  scale_x_continuous(limits = c(-5000, (max(sest$pred_date_ce)) * 1.1), breaks = c(-5000, -4000, -3000, -2000, -1000, 0, 1000, 2000), expand = c(0, 0), name = "Year") +
+  scale_y_continuous(limits = c(0, (max(sest$ma, na.rm = TRUE) * 1.1)),  breaks = c(1e-04, 2e-04), expand = c(0, 0), labels = fancy_scientific, name = "Bird extinction rate (extinctions/species/year)") +
+  facet_wrap(~ run, nrow = 10) +
+  theme(plot.title = element_text(hjust = 0.5),
+        strip.background = element_blank(),
+        strip.text = element_blank(),
+        axis.title.y = element_text(margin = margin(t = 0, r = 20, b = 0, l = 0)))
+
+sest_comb <- cowplot::plot_grid(sest_pleist, sest_zoom, ncol = 2, labels = c("a", "b"))
+
+cowplot::save_plot("outputs/wiggle_single_estimates.png", sest_comb, base_width = 18, base_height = 10, dpi = 300, bg = "white")
+
+```
+
+#### Interpolation vs extrapolation
+
+```{r}
+nz_un <- pred_trans_unscaled %>%
+  dplyr::filter(Archip_10km == "New_Zealand") %>%
+  dplyr::select(res_eff)
+
+prep_ex <- ex %>% 
+  dplyr::group_by(Archip_10km) %>% 
+  # median per archipelago
+  dplyr::summarise_at(vars(pred_spp_r, ext_spp_all), median)
+
+# prep_extrap <- pred_uni %>% 
+#   dplyr::group_by(Archip_10km) %>% 
+#   dplyr::sample_n(1000) %>% 
+#   # median per archipelago
+#   dplyr::summarise(ext_spp_extrap = median(pred_spp_r)) %>% 
+#   dplyr::left_join(prep_ex, by = "Archip_10km")
+
+prep_ar <- prep_ex %>% 
+  #dplyr::mutate(pred_spp = log((ext_spp_all) + 1)) %>% 
+  dplyr::mutate(pred_spp_extrap = ext_spp_all + pred_spp_r) %>%
+  dplyr::left_join(pred_trans_unscaled, by = "Archip_10km") %>% 
+  dplyr::mutate(res_eff = nz_un$res_eff)
+
+hull_fun <- function(x, y = "ext_spp", t = "pred_spp_extrap") {
+  
+  hull <- pred_trans_unscaled %>%
+    slice(chull(.data[[x]], log(.data[[y]] + 1)))
+  
+  col_pal <- colorRampPalette(c("grey20", "white"))(200)
+  
+  ggplot() +
+    stat_density_2d(data = pred_trans_unscaled, aes(x = .data[[x]], y = log(.data[[y]] + 1), fill = ..density..), geom = "raster", contour = FALSE) +
+    scale_fill_gradientn(colours = rev(col_pal)) +
+    geom_point(data = pred_trans_unscaled, aes(x = .data[[x]], y = log(.data[[y]] + 1)), shape = 16, colour = "black") +
+    geom_point(data = prep_ar, aes(x = .data[[x]], y = log(.data[[t]] + 1)), shape = 17, colour = "#0072B2") +
+    geom_polygon(data = hull, aes(x = .data[[x]], y = log(.data[[y]] + 1)), colour = "black", alpha = 0) +
+    labs(x = x, y = "") +
+    theme(legend.position = "none") +
+  ggplot2::theme(plot.background = element_rect(fill = "white", colour = "white"))
+    
+}
+
+ch_res_eff <- hull_fun(x = "res_eff") +
+  labs(x = bquote(log * "(" * "Research effort" * " + 1)"))
+
+ch_Dist <- hull_fun(x = "Dist") +
+  labs(x = bquote(log * "(" * "Isolation distance" * ")"))
+
+ch_SLMP <- hull_fun(x = "SLMP") +
+  labs(x = "Surrounding landmass")
+
+ch_Elev <- hull_fun(x = "Elev") +
+  labs(x = bquote(log * "(" * "Elevation" * ")"))
+
+ch_Temp <- hull_fun(x = "Temp") +
+  labs(x = "Temperature")
+
+ch_Prec <- hull_fun(x = "Prec") +
+  labs(x = "Precipitation")
+
+ch_varT <- hull_fun(x = "varT") +
+  labs(x = "Temperature variability")
+
+ch_varP <- hull_fun(x = "varP") +
+  labs(x = "Precipitation variability")
+
+ch_SRML <- hull_fun(x = "SRML") +
+  labs(x = "Mainland plant richness")
+ 
+ch_SR_GAM <- hull_fun(x = "SR_GAM") +
+  labs(x = bquote(log * "(" * "Archipelago plant richness" * ")"))
+
+ch_end_spp <- hull_fun(x = "end_spp") +
+  labs(x = bquote(log * "(" * "Endemic birds" * " + 1)"))
+
+ch_tot_area <- hull_fun(x = "tot_area") +
+  labs(x = bquote(log * "(" * "Total area" * ")"))
+
+ch_pa_rodents <- hull_fun(x = "pa_rodents") +
+  labs(x = "Native rodents")
+
+ch_hum <- hull_fun(x = "hum") +
+  labs(x = bquote(log * "(" * "Human arrival" * ")"))
+
+ch_grid <- cowplot::plot_grid(ch_res_eff, ch_Dist, ch_Elev, ch_Temp, ch_Prec, ch_varT, ch_varP, ch_SR_GAM, ch_tot_area, ch_pa_rodents, ch_hum, ch_end_spp)
+
+# fake data
+fk_df <- data.frame(x = c(1, 2), y = c(1, 2), z = factor(c("Fossil", "Extrapolated"), levels = c("Fossil", "Extrapolated")))
+
+# plot for legend
+fk_leg <- cowplot::get_legend(ggplot(fk_df, aes(x = x, y = y, colour = z, shape = z)) +
+  geom_point() +
+  scale_color_manual(values = c(Fossil = "black", Extrapolated = "#0072B2")) +
+  theme(legend.direction = "horizontal",
+        legend.position = c(0.45, 0.5), 
+        legend.title = element_blank()))
+
+# plot for axis label
+fk_ax <- ggplot(data = pred_trans_unscaled, aes(x = res_eff, y = ext_spp)) +
+  geom_point(colour = "white") + 
+  labs(x = "", y = bquote(log * "(Extinct birds + 1)")) +
+  theme(axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
+
+ch_grid2 <- cowplot::plot_grid(fk_ax, ch_grid, rel_widths = c(0.02, 1))
+
+ch_grid3 <- cowplot::plot_grid(ch_grid2, fk_leg, ncol = 1, nrow = 2, rel_heights = c(1, 0.1)) +
+  ggplot2::theme(plot.background = element_rect(fill = "white", colour = "white"))
+
+# save_plot("outputs/ch_grid.png", ch_grid3, base_width = 16, base_height = 14, dpi = 300)
+
+```
+
+
+## Lower bound
+
+#### Description dates for lower bound
+
+```{r}
+
+# description dates
+dates_found <- ext_pre_all %>%
+  dplyr::select(species, ref.date, authority) %>%
+  # unique species
+  dplyr::distinct(species, .keep_all = TRUE) %>% 
+  dplyr::rowwise() %>%
+  # extract date of description authority
+  dplyr::mutate(found = as.numeric(unlist(stringr::str_match_all(authority, "[0-9]+"))[1])) %>%
+  dplyr::mutate(undescribed = ifelse(stringr::str_detect(authority, fixed("undescribed")), 1, 0)) %>%
+  # filter to only officially described species
+  dplyr::filter(undescribed == 0)
+
+# # for tutorial
+# test <- dplyr::select(dates_found, species:authority, described = found)
+# write.csv(test, "~/R/R_Projects/total_div/data/data_S4_descr.csv", row.names = FALSE)
+
+dates_descr <- dplyr::count(dates_found, found) %>%
+  mutate(cumsum = cumsum(n))
+
+#plot(dates_descr$found, dates_descr$cumsum)
+
+#write.csv(dates_descr, "data/accumulation.csv", row.names = FALSE)
+
+```
+
+#### Lower bound model
+
+```{r}
+
+## Daniele ##
+
+get_mu0_logistic <- function(L, k, x0, x){
+	return( L/(1+exp(-k*(x-x0))) )
+}
+
+sliding_window <- function(i,wsize=0.5){
+	new_i <- i+(runif(1)-0.5)*wsize
+	return(new_i)
+}
+
+multiplier_proposal <- function(i,d=1.1){
+	u <- runif(1)
+	l <- 2*log(d)
+	m <- exp(l*(u-.5))
+ 	ii <- i * m
+	hastings_ratio <- log(m)
+	return( c(ii, hastings_ratio) )
+}
+
+tbl = as.data.frame(dates_descr)
+x = tbl[,1] - min(tbl[,1])
+dat = tbl[,3]
+plot(tbl[,1], dat)
+
+#plot(tbl[,1], log(dat))
+
+#lines(tbl[,1], (1-exp(-0.025*x))*10)
+
+#plot(tbl[,2])
+
+maxDat = max(dat)
+# init parameters
+epsilonA = 2   # error (variance)
+LA = maxDat*10 # maximum of the logistic = 'dy + L'
+dyA = 0        # shifts up or down the logistic
+kA = 2         # slope
+x0A = min(x)   # mid point
+
+mu0 = get_mu0_logistic(LA, kA, x0A, x) + dyA
+
+likA = sum(dnorm(dat, mu0, epsilonA, log = TRUE))
+
+res = NULL
+
+for (it in 0:100000000){
+	L  <- LA
+	k  <- kA
+	x0 <- x0A
+	dy <- dyA
+	epsilon <- epsilonA
+	hasting = 0
+	r = runif(5)
+	if (r[1]< 0.1) {
+		temp = multiplier_proposal(LA, 1.2)
+		L=temp[1]
+		hasting = hasting+temp[2]
+	}
+	if (r[2]< 0.1) {
+		temp = multiplier_proposal(kA)
+		k = temp[1]
+		hasting = hasting+temp[2]
+	}
+	if (r[3]< 0.1) {
+		x0 = sliding_window(x0A, 5)
+		if (x0>max(x)){
+			x0 = max(x)- ( x0-max(x))
+		}
+	}
+	if (r[4]< 0.1) {
+		dy = sliding_window(dyA, 2)
+	}
+	if (r[5]< 0.1) {
+		temp = multiplier_proposal(epsilon, 1.2)
+		epsilon = temp[1]
+		hasting = hasting+temp[2]
+	}
+	mu0 = get_mu0_logistic(L, k, x0, x)+dy
+	lik = sum(dnorm( dat, mu0, epsilon, log=T ))
+	if (it %% 5000==0){
+		#print(c(likA, LA, kA, x0A, dyA))
+		res = rbind(res, c(it, likA, LA, kA, x0A, dyA, epsilonA))
+	}
+	if ((lik - likA + hasting) > log(runif(1))){
+		LA  = L
+		kA  = k
+		x0A = x0
+		dyA = dy
+		epsilonA = epsilon
+		likA = lik
+	}
+}
+
+plot(tbl[,1], dat, ylim = c(0, 600), xlim = c(1830, 2100))
+# plot estimated results
+lines(tbl[,1], get_mu0_logistic(LA, kA, x0A, x)+dyA )
+
+sum(dnorm( dat, 25+get_mu0_logistic(100, 1, 0, x), epsilonA, log=TRUE ))
+res = as.data.frame(res)
+colnames(res) = c("it", "likA", "LA", "kA", "x0A", "dyA", 'epsilonA')
+
+out <- list(tbl, dat, res, mu0)
+
+# save: out
+saveRDS(out, "data/low_spp_out2.rds")
+
+# load: out
+out <- readRDS("data/low_spp_out2.rds")
+
+tbl <- out[[1]]
+dat <- out[[2]]
+res <- out[[3]]
+mu0 <- out[[4]]
+
+# diagnostics
+
+# plot(res$LA ~ res$x0A)
+# 
+# plot(res$LA[11:dim(res)[1]] ~ res$likA[11:dim(res)[1]])
+# 
+# plot((res$LA[11:dim(res)[1]]),type="l")
+# 
+# plot(res$x0A+min(tbl[,1]))
+
+# sample from lower bound
+
+post <- res[22:nrow(res),]
+
+# randomized sample order
+set.seed(186875)
+rseq <- as.vector(sample(1:nrow(post), nrow(post), replace = FALSE))
+
+low_samp <- post %>%
+  dplyr::mutate(low_spp = LA - sum(tbl$n)) %>%
+  dplyr::mutate(dist = "low") %>%
+  dplyr::mutate(sample = rseq) %>%
+  # order by sample number rather than iteration number
+  dplyr::arrange(sample)
+# 
+# # save: low_samp
+# saveRDS(low_samp, "data/df_low_samp2.rds")
+
+# load: low_samp
+low_samp <- readRDS("data/df_low_samp2.rds")
+
+# # sample 1000 values for plots
+# low_samp_1000 <- dplyr::sample_n(low_samp, 1000)
+# 
+# # save: low_samp_1000
+# saveRDS(low_samp_1000, "data/df_low_samp_1000_2.rds")
+
+# load: low_samp_1000
+low_samp_1000 <- readRDS("data/df_low_samp_1000_2.rds")
+
+df <- cbind(tbl[,1], dat, mu0) %>% 
+  as.data.frame()
+
+p1 <- ggplot(df, aes(x = V1, y = dat)) +
+  geom_point(colour = "black") +
+  geom_line(aes(x = V1, y = mu0), colour = "black") +
+  scale_y_continuous(limits = c(0, max(low_samp_1000$LA) + 20), breaks = pretty_breaks(n = 5)) +
+  labs(x = "Year described", y = "Fossil extinct birds")
+
+p2 <- ggplot(low_samp_1000, aes(x = dist, y = LA)) +
+  geom_half_violin(side = "r", fill = "#009E73", colour = "#009E73") +
+  geom_point(data = data.frame(dist = "low", LA = median(low_samp_1000$LA)), colour = "#009E73", size = 5, shape = 15) +
+  ylim(0, max(low_samp_1000$LA) + 20) +
+  scale_x_discrete(labels = c("Describable species")) +
+  theme(panel.border = element_blank(), axis.line = element_line(), axis.line.y = element_blank(), axis.title = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank(), legend.position = "none")
+
+p_comb <- cowplot::plot_grid(p1, p2, rel_widths = c(1, 0.6), align = "h") +
+  ggplot2::theme(plot.background = element_rect(fill = "white", colour = "white"))
+
+# cowplot::save_plot("outputs/low_spp.png", p_comb, base_width = 12, base_height = 7, dpi = 600)
+
+median(low_samp_1000$low_spp)
+
+```
+
+

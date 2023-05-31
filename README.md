@@ -2,9 +2,9 @@
 [![GitHub license](https://img.shields.io/github/license/Naereen/StrapDown.js.svg)](https://github.com/03rcooke/ext_birds/blob/main/LICENSE)
 <!-- badges: end -->
 
-# Undiscovered bird extinctions conceal the largest human-driven vertebrate extinction event
+# The largest human-driven extinction event is concealed within birds
 ## ext_birds repository
-This repository contains the required R code and data files to reproduce the analyses and plots in: 'Undiscovered bird extinctions conceal the largest human-driven vertebrate extinction event' Rob Cooke, Ferran Sayol, Tobias Andermann, Tim M. Blackburn, Manuel J. Steinbauer, Alexandre Antonelli, & Søren Faurby.
+This repository contains the required R code and data files to reproduce the analyses and plots in: 'The largest human-driven extinction event is concealed within birds' Rob Cooke, Ferran Sayol, Tobias Andermann, Tim M. Blackburn, Manuel J. Steinbauer, Alexandre Antonelli, & Søren Faurby.
 
 ***
 
