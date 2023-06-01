@@ -943,6 +943,8 @@ ex_tot_hdi <- HDInterval::hdi(ex_tot$n, credMass = 0.95) %>%
   as.data.frame() %>% 
   dplyr::mutate(median = median(ex_tot$n))
 
+ex_tot_hdi
+
 # observed
 hist_all <- ex_da_all %>% 
   dplyr::filter(dist == "hist_kno" | dist == "hist_un") %>% 
@@ -953,6 +955,8 @@ hist_cross_all <- HDInterval::hdi(hist_all$n, credMass = 0.95) %>%
   t() %>% 
   as.data.frame() %>% 
   dplyr::mutate(median = median(hist_all$n))
+
+hist_cross_all
 
 # fossil
 pre_kno_all <- ex_da_all %>% 
@@ -965,6 +969,8 @@ pre_kno_cross_all <- HDInterval::hdi(pre_kno_all$n, credMass = 0.95) %>%
   as.data.frame() %>% 
   dplyr::mutate(median = median(pre_kno_all$n))
 
+pre_kno_cross_all
+
 # undiscovered
 pre_un_all <- ex_da_all %>% 
   dplyr::filter(dist == "pre_un") %>% 
@@ -976,10 +982,12 @@ pre_un_cross_all <- HDInterval::hdi(pre_un_all$n, credMass = 0.95) %>%
   as.data.frame() %>% 
   dplyr::mutate(median = median(pre_un_all$n))
 
+pre_un_cross_all
+
 ## overall stats ##
 
-# proportion extinct
-ex_tot_hdi$median / (10865 + ex_tot_hdi$median)
+# percent extinct
+(ex_tot_hdi$median / (10865 + ex_tot_hdi$median)) * 100
 
 # maximum extinction rate
 ex_da_years_sum[which.max(ex_da_years_sum$ma_mean),]
