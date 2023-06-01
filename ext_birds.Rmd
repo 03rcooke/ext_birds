@@ -83,9 +83,9 @@ scaled_pred_orig <- readr::read_csv("data/scaled_pred.csv")
 colz_orig <- readr::read_csv("data/colz.csv")
 # Archip = Region; prehist = Prehistorically settled (i.e., pre-1500 CE); cont = Continental; hum = Central human arrival date estimate (years before present); hum_low = Lower estimate of human arrival date (years before present); hum_upp = Upper estimate of human arrival date (years before present); ref = Reference; full_ref = Full reference 
 
-# 
+# bird extinctions
 bird_orig <- readr::read_csv("data/bird.csv")
-
+# Archip = Archipelago; sp_id = Species ID; IDsps = ID from Sayol et al.; species = Species name; commonName = Common name; grp = Group; ext_date_min = Minimum extinction date; ext_date_max = Maximum extinction date; ext_date = Central extinction date; year_last_recorded = Year last recorded for possibly extinct species; p_records = Extinction probability based on records for possibly extinct species; p_threats = Extinction probability based on threats for possibly extinct species; fossil_max = Maximum age of fossil; fossil_min = Minimum age of fossil
 
 ```
 
@@ -354,11 +354,11 @@ loocv_upp <- function(i, df, mod) {
   
 }
 
-# cv_um2 <- sapply(1:nrow(dri_scale), function(i) loocv_upp(i = i, df = 
-#                                                             dri_scale_spa %>%
-#                   tibble::rownames_to_column("rowid"), mod = um2_rac))
-# 
-# met_um2 <- hydroGOF::gof(cv_um2, dri_scale$all_spp, do.spearman = TRUE)
+cv_um2 <- sapply(1:nrow(dri_scale), function(i) loocv_upp(i = i, df =
+                                                            dri_scale_spa %>%
+                  tibble::rownames_to_column("rowid"), mod = um2_rac))
+
+met_um2 <- hydroGOF::gof(cv_um2, dri_scale$all_spp, do.spearman = TRUE)
 
 ```
 
@@ -506,6 +506,7 @@ ex <- dplyr::bind_rows(comb_ex, nz_run)
 # extrapolate
 
 scaled_pred <- scaled_pred_orig
+mcmc_lin <- mcmc_lin_orig
 
 # research effort in New Zealand
 nz <- scaled_pred %>%
@@ -946,55 +947,45 @@ ex_tot_hdi <- HDInterval::hdi(ex_tot$n, credMass = 0.95) %>%
 hist_all <- ex_da_all %>% 
   dplyr::filter(dist == "hist_kno" | dist == "hist_un") %>% 
   dplyr::ungroup() %>% 
-  dplyr::count(run) %>% 
-  dplyr::mutate(grp = "hist")
+  dplyr::count(run)
 
 hist_cross_all <- HDInterval::hdi(hist_all$n, credMass = 0.95) %>% 
   t() %>% 
   as.data.frame() %>% 
-  dplyr::mutate(median = median(hist_all$n)) %>% 
-  dplyr::mutate(grp = "hist")
+  dplyr::mutate(median = median(hist_all$n))
 
 # fossil
 pre_kno_all <- ex_da_all %>% 
   dplyr::filter(dist == "pre_kno") %>% 
   dplyr::ungroup() %>% 
-  dplyr::count(run) %>% 
-  dplyr::mutate(grp = "pre_kno")
+  dplyr::count(run)
 
 pre_kno_cross_all <- HDInterval::hdi(pre_kno_all$n, credMass = 0.95) %>%
   t() %>% 
   as.data.frame() %>% 
-  dplyr::mutate(median = median(pre_kno_all$n)) %>% 
-  dplyr::mutate(grp = "pre_kno")
+  dplyr::mutate(median = median(pre_kno_all$n))
 
 # undiscovered
 pre_un_all <- ex_da_all %>% 
   dplyr::filter(dist == "pre_un") %>% 
   dplyr::ungroup() %>% 
-  dplyr::count(run) %>% 
-  dplyr::mutate(grp = "pre_un")
+  dplyr::count(run)
 
 pre_un_cross_all <- HDInterval::hdi(pre_un_all$n, credMass = 0.95) %>% 
   t() %>% 
   as.data.frame() %>% 
-  dplyr::mutate(median = median(pre_un_all$n)) %>% 
-  dplyr::mutate(grp = "pre_un")
+  dplyr::mutate(median = median(pre_un_all$n))
 
 ## overall stats ##
 
 # proportion extinct
 ex_tot_hdi$median / (10865 + ex_tot_hdi$median)
-ex_tot_hdi$lower / (10865 + ex_tot_hdi$lower)
-ex_tot_hdi$upper / (10865 + ex_tot_hdi$upper)
 
 # maximum extinction rate
 ex_da_years_sum[which.max(ex_da_years_sum$ma_mean),]
 
 # percent unrecorded
 (pre_un_cross_all$median / ex_tot_hdi$median) * 100
-(pre_un_cross_all$lower / ex_tot_hdi$lower) * 100
-(pre_un_cross_all$upper / ex_tot_hdi$upper) * 100
 
 ```
 
