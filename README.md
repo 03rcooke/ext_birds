@@ -9,3 +9,9 @@ This repository contains the required R code and data files to reproduce the ana
 ***
 
 These scripts have been run using R version 4.0.4 - Copyright (C) 2021 The R Foundation for Statistical Computing.
+
+***
+
+## For all analyses:
+
+See `ext_birds.Rmd`
