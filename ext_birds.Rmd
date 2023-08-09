@@ -16,6 +16,7 @@ editor_options:
 # see renv for all packages
 
 library(dplyr)
+library(cli)
 
 # # save snapshot of packages to renv
 # renv::snapshot()
@@ -59,6 +60,10 @@ Butchart et al., 2018 - https://doi.org/10.1016/j.biocon.2018.08.014
 Preprocessing code available upon request (roboke@ceh.ac.uk)
 
 ```{r}
+
+# # islands within archipelagos
+# isl_orig <- readr::read_csv("data/isl_arch.csv")
+# # 
 
 # recorded fossil predictor data
 pred_orig <- readr::read_csv("data/pred.csv")
@@ -194,9 +199,9 @@ met3 <- hydroGOF::gof(cv3, pred_trans$ext_spp, do.spearman = TRUE)
 
 ```{r}
 
-# research effort in New Zealand
+# research effort in Aotearoa New Zealand
 nz <- pred_trans %>%
-  dplyr::filter(Archip == "New Zealand") %>%
+  dplyr::filter(Archip == "Aotearoa New Zealand") %>%
   dplyr::select(res_eff)
 
 # 10,000 posterior draws for example (60,000 used for study)
@@ -254,8 +259,8 @@ pred_dist <- lapply(1:nrow(pred_trans_log), extrapolate_samps)
 
 pred_uni <- dplyr::bind_cols(pred_dist) %>%
   tidyr::gather(key = "Archip", value = "pred_spp") %>%
-  # drop New Zealand
-  dplyr::filter(Archip != "New Zealand") %>%
+  # drop Aotearoa New Zealand
+  dplyr::filter(Archip != "Aotearoa New Zealand") %>%
   dplyr::mutate(sample = rep(1:(nrow(.)/(nrow(pred) - 1)), times = (nrow(pred) - 1))) %>%
   # probability-based rounding
   dplyr::mutate(pred_spp_r = prob_ro(pred_spp)) %>%
@@ -277,8 +282,8 @@ pred_dist <- lapply(1:nrow(pred_trans_log), extrapolate_samps)
 
 pred_uni_glm <- dplyr::bind_cols(pred_dist) %>%
   tidyr::gather(key = "Archip", value = "pred_spp") %>%
-  # drop New Zealand
-  dplyr::filter(Archip != "New Zealand") %>%
+  # drop Aotearoa New Zealand
+  dplyr::filter(Archip != "Aotearoa New Zealand") %>%
   dplyr::mutate(sample = rep(1:(nrow(.)/(nrow(pred) - 1)), times = (nrow(pred) - 1))) %>%
   # probability-based rounding
   dplyr::mutate(pred_spp_r = prob_ro(pred_spp)) %>%
@@ -354,6 +359,7 @@ loocv_upp <- function(i, df, mod) {
   
 }
 
+# cross-validate upper bound model - takes a while
 cv_um2 <- sapply(1:nrow(dri_scale), function(i) loocv_upp(i = i, df =
                                                             dri_scale_spa %>%
                   tibble::rownames_to_column("rowid"), mod = um2_rac))
@@ -482,8 +488,8 @@ comb_ex <- comb_upp_rej %>%
   dplyr::mutate(run = 1:n_samp) %>%
   dplyr::select(Archip, run, pred_spp_r, ext_spp, ant_spp, tot_spp)
 
-# add data for New Zealand
-nz_run <- dplyr::filter(pred_orig, Archip == "New Zealand") %>% 
+# add data for Aotearoa New Zealand
+nz_run <- dplyr::filter(pred_orig, Archip == "Aotearoa New Zealand") %>% 
   dplyr::mutate(pred_spp_r = 0) %>% 
   dplyr::mutate(tot_spp = ext_spp + ant_spp + pred_spp_r) %>% 
   dplyr::slice(rep(1:n(), each = n_samp)) %>% 
@@ -508,9 +514,9 @@ ex <- dplyr::bind_rows(comb_ex, nz_run)
 scaled_pred <- scaled_pred_orig
 mcmc_lin <- mcmc_lin_orig
 
-# research effort in New Zealand
+# research effort in Aotearoa New Zealand
 nz <- scaled_pred %>%
-  dplyr::filter(Archip == "New Zealand") %>%
+  dplyr::filter(Archip == "Aotearoa New Zealand") %>%
   dplyr::select(res_eff)
 
 # posterior coefficients
@@ -563,8 +569,8 @@ pred_dist_wn <- lapply(1:nrow(scaled_pred), extrapolate_samps_wn)
 
 pred_uni_wn <- dplyr::bind_cols(pred_dist_wn) %>%
   tidyr::gather(key = "Archip", value = "pred_spp") %>%
-  # drop New Zealand
-  dplyr::filter(Archip != "New Zealand") %>%
+  # drop Aotearoa New Zealand
+  dplyr::filter(Archip != "Aotearoa New Zealand") %>%
   dplyr::mutate(sample = rep(1:(nrow(.)/(nrow(scaled_pred) - 1)), times = (nrow(scaled_pred) - 1))) %>%
   # probability-based rounding
   dplyr::mutate(pred_spp_r = prob_ro(pred_spp)) %>%
@@ -598,9 +604,7 @@ upp_perc_wn <- comb_upp_rej_wn %>%
 
 # upper bound rejection rate
 median(upp_perc_wn$perc)
-# 0
 mean(upp_perc_wn$perc)
-# 11.05575
 
 # tidy rejection sampling
 comb_ex_wn <- comb_upp_rej_wn %>%
@@ -637,7 +641,7 @@ colz_uncert <- colz %>%
   # upper estimate
   dplyr::mutate(hum_upp = ifelse(is.na(hum_upp), hum - (mean(.$hum_uncert, na.rm = TRUE) * hum), hum_upp))
 
-# randomized extinction chronology based on New Zealand (i.e., island)
+# randomized extinction chronology based on Aotearoa New Zealand (i.e., island)
 
 # rate - half-life of 100 years
 rate <- -log(0.5)/100
@@ -994,6 +998,124 @@ ex_da_years_sum[which.max(ex_da_years_sum$ma_mean),]
 
 # percent unrecorded
 (pre_un_cross_all$median / ex_tot_hdi$median) * 100
+
+```
+
+## Supplementary Methods - Lower bound model
+
+```{r}
+
+# species description dates
+dates_found_orig <- readr::read_csv("data/dates_found.csv")
+
+# description dates for lower bound - cumulative description rate
+dates_descr <- dplyr::count(dates_found_orig, described) %>%
+  dplyr::mutate(cumsum = cumsum(n))
+
+# functions for modelling logisitic - Daniele Silvestro
+get_mu0_logistic <- function(L, k, x0, x){
+	return(L / (1 + exp(-k * (x - x0))))
+}
+
+sliding_window <- function(i, wsize = 0.5){
+	new_i <- i + (runif(1) - 0.5) * wsize
+	return(new_i)
+}
+
+multiplier_proposal <- function(i, d = 1.1){
+	u <- runif(1)
+	l <- 2 * log(d)
+	m <- exp(l * (u - 0.5))
+ 	ii <- i * m
+	hastings_ratio <- log(m)
+	return(c(ii, hastings_ratio))
+}
+
+# time steps
+x <- dates_descr$described - min(dates_descr$described)
+
+# cumulative description
+dat <- dates_descr$cumsum
+
+maxDat <- max(dat)
+# init parameters
+epsilonA <- 2   # error (variance)
+LA <- maxDat * 10 # maximum of the logistic = 'dy + L'
+dyA <- 0        # shifts up or down the logistic
+kA <- 2         # slope
+x0A <- min(x)   # mid point
+
+mu0 <- get_mu0_logistic(LA, kA, x0A, x) + dyA
+
+likA <- sum(dnorm(dat, mu0, epsilonA, log = TRUE))
+
+res <- NULL
+
+# 1,000,000 iterations for example
+for (it in 0:1000000){
+	L  <- LA
+	k  <- kA
+	x0 <- x0A
+	dy <- dyA
+	epsilon <- epsilonA
+	hasting <- 0
+	r <- runif(5)
+	if (r[1] < 0.1) {
+		temp = multiplier_proposal(LA, 1.2)
+		L = temp[1]
+		hasting = hasting + temp[2]
+	}
+	if (r[2] < 0.1) {
+		temp = multiplier_proposal(kA)
+		k = temp[1]
+		hasting = hasting + temp[2]
+	}
+	if (r[3] < 0.1) {
+		x0 = sliding_window(x0A, 5)
+		if (x0 > max(x)){
+			x0 = max(x)- (x0 - max(x))
+		}
+	}
+	if (r[4] < 0.1) {
+		dy = sliding_window(dyA, 2)
+	}
+	if (r[5] < 0.1) {
+		temp = multiplier_proposal(epsilon, 1.2)
+		epsilon = temp[1]
+		hasting = hasting + temp[2]
+	}
+	mu0 = get_mu0_logistic(L, k, x0, x) + dy
+	lik = sum(dnorm(dat, mu0, epsilon, log = TRUE))
+	if (it %% 5000 == 0){
+		res = rbind(res, c(it, likA, LA, kA, x0A, dyA, epsilonA))
+	}
+	if ((lik - likA + hasting) > log(runif(1))){
+		LA  = L
+		kA  = k
+		x0A = x0
+		dyA = dy
+		epsilonA = epsilon
+		likA = lik
+	}
+}
+
+# tidy output data
+res <- as.data.frame(res) %>% 
+  setNames(c("it", "likA", "LA", "kA", "x0A", "dyA", "epsilonA"))
+
+# simple plot of estimated results
+plot(dates_descr$described, dat); lines(dates_descr$described, get_mu0_logistic(LA, kA, x0A, x) + dyA)
+
+# sample from lower bound
+
+# lower bound estimates
+# posterior distribution
+low_samp <- res[11:nrow(res),] %>%
+  # subtract described species from describable species to get undescribed species
+  dplyr::mutate(low_spp = LA - sum(dates_descr$n)) %>%
+  dplyr::mutate(dist = "low")
+
+median(low_samp$low_spp)
 
 ```
 
