@@ -61,13 +61,13 @@ Preprocessing code available upon request (roboke@ceh.ac.uk)
 
 ```{r}
 
-# # islands within archipelagos
-# isl_orig <- readr::read_csv("data/isl_arch.csv")
-# # 
+# islands within archipelagos
+isl_orig <- readr::read_csv("data/isl_arch.csv")
+# ID_weigelt = ID number from Weigelt et al., 2013; Region = Region number (see Supplementary Fig. 3); Long = Longitude; Lat = Latitude; Archip_weigelt = Archipelago name from Weigelt et al., 2013; Archip = Archipelago/region name; Archip_1:Archip_7 = Alternative archipelago names; Island = Island name; Island_1 = Alternative island name; Area = Island area
 
 # recorded fossil predictor data
 pred_orig <- readr::read_csv("data/pred.csv")
-# Archip = Archipelago; res_eff = Research effort; Dist = Isolation distance; SLMP = Surrounding landmass; Elev = Elevation; Temp = Temperature; Prec = Precipitation; varT = Temperature variability; varP = Precipitation variability; SR_GAM = Archipelago plant richness; tot_area = Total area; sd_area = SD area; pa_rodents = Native rodents; hum = Human arrival; end_spp = Endemic bird species; ext_spp = Fossil bird extinctions; ant_spp = Bird species extant at 1500 CE (extant and observed extinctions [post-1500 CE])
+# Archip = Archipelago name; res_eff = Research effort; Dist = Isolation distance; SLMP = Surrounding landmass; Elev = Elevation; Temp = Temperature; Prec = Precipitation; varT = Temperature variability; varP = Precipitation variability; SR_GAM = Archipelago plant richness; tot_area = Total area; sd_area = SD area; pa_rodents = Native rodents; hum = Human arrival; end_spp = Endemic bird species; ext_spp = Fossil bird extinctions; ant_spp = Bird species extant at 1500 CE (extant and observed extinctions [post-1500 CE])
 
 # upper bound predictor data
 dri_orig <- readr::read_csv("data/dri.csv")
@@ -75,7 +75,7 @@ dri_orig <- readr::read_csv("data/dri.csv")
 
 # archipelago predictor data
 dri_arch_orig <- readr::read_csv("data/dri_arch.csv")
-# Archip = Archipelago; Elev = Elevation; Temp = Temperature; Prec = Precipitation; varT = Temperature variability; varP = Precipitation variability
+# Archip = Archipelago name; Elev = Elevation; Temp = Temperature; Prec = Precipitation; varT = Temperature variability; varP = Precipitation variability
 
 # MCMC samples from white noise linear model
 # includes 20,000 samples (used 600,000 samples in study)
@@ -86,11 +86,11 @@ scaled_pred_orig <- readr::read_csv("data/scaled_pred.csv")
 
 # human arrival dates
 colz_orig <- readr::read_csv("data/colz.csv")
-# Archip = Region; prehist = Prehistorically settled (i.e., pre-1500 CE); cont = Continental; hum = Central human arrival date estimate (years before present); hum_low = Lower estimate of human arrival date (years before present); hum_upp = Upper estimate of human arrival date (years before present); ref = Reference; full_ref = Full reference 
+# Archip = Archipelago/region name; prehist = Prehistorically settled (i.e., pre-1500 CE); cont = Continental; hum = Central human arrival date estimate (years before present); hum_low = Lower estimate of human arrival date (years before present); hum_upp = Upper estimate of human arrival date (years before present); ref = Reference; full_ref = Full reference 
 
 # bird extinctions
 bird_orig <- readr::read_csv("data/bird.csv")
-# Archip = Archipelago; sp_id = Species ID; IDsps = ID from Sayol et al.; species = Species name; commonName = Common name; grp = Group; ext_date_min = Minimum extinction date; ext_date_max = Maximum extinction date; ext_date = Central extinction date; year_last_recorded = Year last recorded for possibly extinct species; p_records = Extinction probability based on records for possibly extinct species; p_threats = Extinction probability based on threats for possibly extinct species; fossil_max = Maximum age of fossil; fossil_min = Minimum age of fossil
+# Archip = Archipelago name; sp_id = Species ID; IDsps = ID from Sayol et al.; species = Species name; commonName = Common name; grp = Group; ext_date_min = Minimum extinction date; ext_date_max = Maximum extinction date; ext_date = Central extinction date; year_last_recorded = Year last recorded for possibly extinct species; p_records = Extinction probability based on records for possibly extinct species; p_threats = Extinction probability based on threats for possibly extinct species; fossil_max = Maximum age of fossil; fossil_min = Minimum age of fossil
 
 ```
 
@@ -1007,6 +1007,7 @@ ex_da_years_sum[which.max(ex_da_years_sum$ma_mean),]
 
 # species description dates
 dates_found_orig <- readr::read_csv("data/dates_found.csv")
+# species = Scientific name; ref.date = Reference for date described; authority = Taxonomic authority; described = Year described
 
 # description dates for lower bound - cumulative description rate
 dates_descr <- dplyr::count(dates_found_orig, described) %>%
