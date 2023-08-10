@@ -472,9 +472,7 @@ upp_perc <- comb_upp_rej %>%
 
 # upper bound rejection rate
 median(upp_perc$perc)
-# 0.165
 mean(upp_perc$perc)
-# 11.52686
 
 # 100 samples to keep (1,000 samples used in study)
 n_samp <- 100
