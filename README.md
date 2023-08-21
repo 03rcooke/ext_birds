@@ -14,4 +14,4 @@ These scripts have been run using R version 4.0.4 - Copyright (C) 2021 The R Fou
 
 ## For all analyses:
 
-See `ext_birds.Rmd`
+See the R notebook `ext_birds.Rmd`
