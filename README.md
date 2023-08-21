@@ -2,9 +2,9 @@
 [![GitHub license](https://img.shields.io/github/license/Naereen/StrapDown.js.svg)](https://github.com/03rcooke/ext_birds/blob/main/LICENSE)
 <!-- badges: end -->
 
-# Undiscovered bird extinctions conceal true magnitude of human-driven extinction waves
+# Undiscovered bird extinctions obscure the true magnitude of human-driven extinction waves
 ## ext_birds repository
-This repository contains the required R code and data files to reproduce the analyses and plots in: 'Undiscovered bird extinctions conceal true magnitude of human-driven extinction waves' Rob Cooke, Ferran Sayol, Tobias Andermann, Tim M. Blackburn, Manuel J. Steinbauer, Alexandre Antonelli, & Søren Faurby.
+This repository contains the required R code and data files to reproduce the analyses and plots in: 'Undiscovered bird extinctions obscure the true magnitude of human-driven extinction waves' Rob Cooke, Ferran Sayol, Tobias Andermann, Tim M. Blackburn, Manuel J. Steinbauer, Alexandre Antonelli, & Søren Faurby.
 
 ***
 
