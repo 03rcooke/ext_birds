@@ -1,5 +1,6 @@
 <!-- badges: start -->
 [![GitHub license](https://img.shields.io/github/license/Naereen/StrapDown.js.svg)](https://github.com/03rcooke/ext_birds/blob/main/LICENSE)
+[![DOI](https://zenodo.org/badge/630854956.svg)](https://zenodo.org/badge/latestdoi/630854956)
 <!-- badges: end -->
 
 # Undiscovered bird extinctions obscure the true magnitude of human-driven extinction waves
