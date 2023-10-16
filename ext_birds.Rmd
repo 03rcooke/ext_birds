@@ -1,7 +1,7 @@
 ---
 title: "ext_birds"
 author: Rob Cooke (roboke@ceh.ac.uk)
-date: 21/04/2023
+date: 13/10/2023
 output: 
   html_notebook:
     toc: TRUE
@@ -21,7 +21,7 @@ library(cli)
 # # save snapshot of packages to renv
 # renv::snapshot()
 
-# set theme as cowplot
+# set plotting theme
 ggplot2::theme_set(cowplot::theme_cowplot())
 
 # function for probability-based rounding
@@ -41,6 +41,9 @@ Sayol et al., 2020 - https://www.science.org/doi/full/10.1126/sciadv.abb6095
 
 Bird distributions:<br/>
 Bird species distribution maps of the world. Version 2018.1. - http://datazone.birdlife.org/species/requestdis
+
+Native rodents:<br/>
+PHYLACINE 1.2: The Phylogenetic Atlas of Mammal Macroecology - https://doi.org/10.5281/zenodo.1250504
 
 Gridded climatic data:<br/>
 WorldClim; Hijmans et al., 2005<br/>
@@ -769,7 +772,8 @@ dates_hist_ext_long <- bird %>%
   dplyr::mutate(ext_date = purrr::pmap(list(x = ext_date_min, y = ext_date_max), ~ runif(1, .x, .y))) %>% 
   tidyr::unnest(cols = c(ext_date)) %>% 
   # convert to years before present
-  dplyr::mutate(pred_date = floor((1950 - ext_date)))
+  dplyr::mutate(pred_date = floor((1950 - ext_date))) %>% 
+  dplyr::mutate(dist = "hist_kno")
 
 # observed possibly extinct - 46 species
 hist_pex <- bird %>% 
@@ -951,12 +955,14 @@ ex_tot_hdi
 hist_all <- ex_da_all %>% 
   dplyr::filter(dist == "hist_kno" | dist == "hist_un") %>% 
   dplyr::ungroup() %>% 
-  dplyr::count(run)
+  dplyr::count(run) %>% 
+  dplyr::mutate(grp = "Observed")
 
 hist_cross_all <- HDInterval::hdi(hist_all$n, credMass = 0.95) %>% 
   t() %>% 
   as.data.frame() %>% 
-  dplyr::mutate(median = median(hist_all$n))
+  dplyr::mutate(median = median(hist_all$n)) %>% 
+  dplyr::mutate(grp = "Observed")
 
 hist_cross_all
 
@@ -964,12 +970,14 @@ hist_cross_all
 pre_kno_all <- ex_da_all %>% 
   dplyr::filter(dist == "pre_kno") %>% 
   dplyr::ungroup() %>% 
-  dplyr::count(run)
+  dplyr::count(run) %>% 
+  dplyr::mutate(grp = "Fossil")
 
 pre_kno_cross_all <- HDInterval::hdi(pre_kno_all$n, credMass = 0.95) %>%
   t() %>% 
   as.data.frame() %>% 
-  dplyr::mutate(median = median(pre_kno_all$n))
+  dplyr::mutate(median = median(pre_kno_all$n)) %>% 
+  dplyr::mutate(grp = "Fossil")
 
 pre_kno_cross_all
 
@@ -977,12 +985,14 @@ pre_kno_cross_all
 pre_un_all <- ex_da_all %>% 
   dplyr::filter(dist == "pre_un") %>% 
   dplyr::ungroup() %>% 
-  dplyr::count(run)
+  dplyr::count(run) %>% 
+  dplyr::mutate(grp = "Undiscovered")
 
 pre_un_cross_all <- HDInterval::hdi(pre_un_all$n, credMass = 0.95) %>% 
   t() %>% 
   as.data.frame() %>% 
-  dplyr::mutate(median = median(pre_un_all$n))
+  dplyr::mutate(median = median(pre_un_all$n)) %>% 
+  dplyr::mutate(grp = "Undiscovered")
 
 pre_un_cross_all
 
@@ -999,7 +1009,126 @@ ex_da_years_sum[which.max(ex_da_years_sum$ma_mean),]
 
 ```
 
-## Supplementary Methods - Lower bound model
+## Main Figures
+
+```{r}
+
+# Figure 2
+
+# recenter
+center <- 145
+
+# world map centred on 145
+mapWorld <- ggplot2::map_data("world", wrap = c(center - 180, center + 180), ylim = c(-60, 85), interior = FALSE)
+
+# recenter islands
+isl_pnts <- isl_orig
+isl_pnts$long_recenter <- ifelse(isl_pnts$Long < center - 180, isl_pnts$Long + 360, isl_pnts$Long)
+
+# group islands into archipelagos
+arch_pnts <- isl_pnts %>%
+  dplyr::group_by(Archip) %>%
+  dplyr::summarise(mean_long_re = weighted.mean(long_recenter, Area), mean_lat = weighted.mean(Lat, Area))
+
+# plot total bird extinction violin
+swarm_tot <- ggplot2::ggplot(ex_tot, ggplot2::aes(x = 1, y = n)) +
+  gghalves::geom_half_violin(side = "r", fill = "grey", colour = "grey") +
+  # 95% credible interval
+  ggplot2::geom_linerange(ggplot2::aes(ymin = ex_tot_hdi$lower, ymax = ex_tot_hdi$upper), colour = "grey40", lwd = 0.8) +
+  # dot for median
+  ggplot2::geom_point(ggplot2::aes(y = ex_tot_hdi$median), size = 4, colour = "grey40") +
+  # label for median
+  ggplot2::annotate("text", x = 1.12, y = ex_tot_hdi$median, label = round(ex_tot_hdi$median, digits = 0), colour = "grey40") +
+  ggplot2::scale_y_continuous(limits = c(0, (1.05 * max(ex_tot$n))), expand = c(0, 0)) +
+  ggplot2::scale_x_continuous(breaks = 1, labels = "Total") +
+  ggplot2::labs(y = "Extinct birds") +
+  ggplot2::theme(axis.title.x = ggplot2::element_blank())
+
+# combine summaries
+all_bar <- dplyr::bind_rows(hist_cross_all, pre_kno_cross_all, pre_un_cross_all) %>% 
+  dplyr::mutate_at(vars(c("lower", "upper")), ~ifelse(grp == "Fossil", NA, .)) %>% 
+  dplyr::mutate(grp = factor(grp, levels = c("Observed", "Fossil", "Undiscovered")))
+
+swarm_dot <- ggplot2::ggplot(all_bar, ggplot2::aes(x = grp, y = median, colour = grp)) +
+  ggplot2::geom_point(colour = NA) +
+  gghalves::geom_half_violin(data = pre_un_all, ggplot2::aes(x = 3, y = n), side = "r", fill = "#ffac6a", colour = "#ffac6a", inherit.aes = FALSE) +
+  ggplot2::geom_linerange(ggplot2::aes(ymin = lower, ymax = upper), lwd = 0.8) +
+  ggplot2::geom_point(size = 4) +
+  ggplot2::annotate("text", x = 1.15, y = all_bar$median[[1]], label = round(all_bar$median[[1]], digits = 0), colour = "#CC79A7") +
+  ggplot2::annotate("text", x = 2.15, y = all_bar$median[[2]], label = round(all_bar$median[[2]], digits = 0), colour = "#0072B2") +
+  ggplot2::annotate("text", x = 3.15, y = all_bar$median[[3]], label = round(all_bar$median[[3]], digits = 0), colour = "#D55E00") +
+  ggplot2::scale_y_continuous(limits = c(0, (1.05 * max(ex_tot$n))), expand = c(0, 0)) +
+  ggplot2::scale_colour_manual(values = c("#CC79A7", "#0072B2", "#D55E00")) +
+  ggplot2::theme(legend.position = "none",
+                 axis.title.x = ggplot2::element_blank(),
+                 axis.line.y = ggplot2::element_blank(),
+                 axis.text.y = ggplot2::element_blank(),
+                 axis.title.y = ggplot2::element_blank(),
+                 axis.ticks.y = ggplot2::element_blank())
+
+# combine total and dot plot
+swarm_tot_dot <- cowplot::plot_grid(swarm_tot, swarm_dot, rel_widths = c(0.5, 1))
+
+# map
+
+# observed
+hist_all_pie <- ex_da_all %>%   
+  dplyr::filter(dist == "hist_kno" | dist == "hist_un") %>% 
+  dplyr::group_by(Archip) %>%
+  dplyr::count(run) %>% 
+  dplyr::group_by(Archip) %>% 
+  dplyr::summarise_at(vars(n), median) %>% 
+  dplyr::rename(hist = n)
+                      
+# fossil
+pre_kno_all_pie <- ex_da_all %>% 
+  dplyr::filter(dist == "pre_kno") %>% 
+  dplyr::group_by(Archip) %>%
+  dplyr::count(run) %>% 
+  dplyr::group_by(Archip) %>% 
+  dplyr::summarise_at(vars(n), median) %>% 
+  dplyr::rename(pre_kno = n)
+
+# undiscovered
+pre_un_all_pie <- ex_da_all %>%
+  dplyr::filter(dist == "pre_un") %>% 
+  dplyr::group_by(Archip) %>%
+  dplyr::count(run) %>% 
+  dplyr::group_by(Archip) %>% 
+  dplyr::summarise_at(vars(n), median) %>% 
+  dplyr::rename(pre_un = n)
+
+# combine data
+all_pie <- dplyr::full_join(hist_all_pie, pre_kno_all_pie, by = "Archip") %>% 
+  dplyr::full_join(pre_un_all_pie, by = "Archip")
+
+arch_pnts_swarm <- arch_pnts %>% 
+  dplyr::left_join(all_pie, by = "Archip") %>% 
+  tidyr::replace_na(list(hist = 0, pre_kno = 0, pre_un = 0)) %>% 
+  dplyr::mutate(tot = hist + pre_kno + pre_un) %>% 
+  dplyr::mutate(tot_a = sqrt(tot/pi))
+
+swarm_map <- ggplot2::ggplot(ggplot2::aes(x = long, y = lat), data = mapWorld) +
+  ggplot2::geom_polygon(ggplot2::aes(group = group), fill = "grey65") +
+  scatterpie::geom_scatterpie(data = arch_pnts_swarm, ggplot2::aes(x = mean_long_re, y = mean_lat, group = Archip, r = tot_a * 1.6), cols = colnames(arch_pnts_swarm)[4:6], alpha = 0.8, colour = NA) +  
+  ggplot2::coord_equal() +
+  ggplot2::scale_x_continuous(expand = c(0, 0), breaks = c(0, 90, 180, 270), labels = c(paste0("0", "°"), paste0("90", "°E"), paste0("180", "°"), paste0("90", "°W"))) +
+  ggplot2::scale_y_continuous(limits = c(-60, 85)) +
+  ggplot2::scale_fill_manual(labels = c("Observed ", "Fossil", "Undiscovered"), values = c("#CC79A7", "#0072B2", "#D55E00")) +
+  ggplot2::labs(x = "Longitude", y = "Latitude", size = "Undiscovered prehistoric extinct birds") +
+  scatterpie::geom_scatterpie_legend((dplyr::filter(arch_pnts_swarm, tot > 0)$tot_a * 1.6), n = 3, x = 215, y = -48, labeller = function(x) signif(pi * (x / 1.6) ^ 2, 1)) +
+  ggplot2::theme(legend.position = "bottom",
+                 legend.title = ggplot2::element_blank())
+
+# combine total, bar and map
+swarm_pie <- cowplot::plot_grid(swarm_tot_dot, swarm_map, nrow = 2, ncol = 1, labels = "auto") +
+  ggplot2::theme(plot.background = ggplot2::element_rect(fill = "white", colour = "white"))
+
+# cowplot::save_plot("figures/swarm_pie_bigger.png", swarm_pie, base_width = 10, base_height = 10, dpi = 300)
+
+```
+
+## Lower bound model
 
 ```{r}
 
