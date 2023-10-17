@@ -16,6 +16,12 @@ authors:
 - family-names: "Steinbauer"
   given-names: "Manuel J."
   orcid: "https://orcid.org/0000-0002-7142-9272"
+- family-names: "Antonelli"
+  given-names: "Alexandre"
+  orcid: "https://orcid.org/0000-0003-1842-9297"
+- family-names: "Faurby"
+  given-names: "Søren"
+  orcid: "https://orcid.org/0000-0002-2974-2628"
 title: "Undiscovered bird extinctions obscure the true magnitude of human-driven extinction waves"
 version: 1.1.1
 doi: 10.5281/zenodo.10014217
@@ -39,6 +45,12 @@ preferred-citation:
   - family-names: "Steinbauer"
     given-names: "Manuel J."
     orcid: "https://orcid.org/0000-0002-7142-9272"
+  - family-names: "Antonelli"
+    given-names: "Alexandre"
+    orcid: "https://orcid.org/0000-0003-1842-9297"
+  - family-names: "Faurby"
+    given-names: "Søren"
+    orcid: "https://orcid.org/0000-0002-2974-2628"
   doi:
   journal: "Nature Communications"
   month: 
