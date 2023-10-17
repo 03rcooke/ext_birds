@@ -16,7 +16,7 @@ editor_options:
 # see renv for all packages
 
 library(dplyr)
-library(cli)
+library(raster)
 
 # # save snapshot of packages to renv
 # renv::snapshot()
@@ -24,9 +24,25 @@ library(cli)
 # set plotting theme
 ggplot2::theme_set(cowplot::theme_cowplot())
 
+# helper functions
+
 # function for probability-based rounding
 prob_ro <- function(ro) {
   ifelse(floor(ro) + runif(n(), 0, 1) < ro, floor(ro) + 1, floor(ro))
+}
+
+# 10^x function from: https://stackoverflow.com/questions/11610377/how-do-i-change-the-formatting-of-numbers-on-an-axis-with-ggplot
+fancy_scientific <- function(l) {
+  # turn in to character string in scientific notation
+  l <- format(l, scientific = TRUE)
+  # leave zero as 0
+  l <- gsub("0e\\+00","0",l)
+  # quote the part before the exponent to keep all the digits
+  l <- gsub("^(.*)e", "'\\1'e", l)
+  # turn the 'e+' into plotmath format
+  l <- gsub("e", "%*%10^", l)
+  # return this as an expression
+  parse(text = l)
 }
 
 ```
@@ -46,8 +62,8 @@ Native rodents:<br/>
 PHYLACINE 1.2: The Phylogenetic Atlas of Mammal Macroecology - https://doi.org/10.5281/zenodo.1250504
 
 Gridded climatic data:<br/>
-WorldClim; Hijmans et al., 2005<br/>
-Elevation; Farr, 2007
+WorldClim; Hijmans et al., 2005 - https://www.worldclim.org/data/worldclim21.html<br/>
+Elevation; Farr, 2007 - https://srtm.csi.cgiar.org/srtmdata/
 
 Landmasses and archipelagos:<br/>
 GADM version 3.6 - https://gadm.org/data.html
@@ -249,8 +265,8 @@ extrapolate_samps <- function(x, df) {
     as.data.frame() %>%
     setNames(ar)
 
-  # print archipelago name - progress
-  print(ar)
+  # # print archipelago name - progress
+  # print(ar)
 
   # return data
   return(out_df)
@@ -557,8 +573,8 @@ extrapolate_samps_wn <- function(x) {
     as.data.frame() %>%
     setNames(ar)
 
-  # print archipelago name - progress
-  print(ar)
+  # # print archipelago name - progress
+  # print(ar)
 
   # return data
   return(out_df)
@@ -912,16 +928,20 @@ ex_da_years_all <- ex_da_all %>%
 ex_da_years_sum <- ex_da_years_all %>%
   # group by year
   group_by(pred_date) %>%
-  # calculate mean extinction rate across runs per year
-  dplyr::summarise(ma_mean = mean(ma)) %>%
+  # calculate median extinction rate across runs per year
+  dplyr::summarise(ma_median = median(ma),
+                   ma_low = HDInterval::hdi(ma, credMass = 0.95)[[1]],
+                   ma_upp = HDInterval::hdi(ma, credMass = 0.95)[[2]]) %>%
   # BCE/CE
   dplyr::mutate(pred_date_ce = 1950 - pred_date)
 
 ex_da_years_cum <- ex_da_years_all %>%
   # group by year
   group_by(pred_date) %>%
-  # calculate mean extinction rate per year
-  dplyr::summarise(cum_mean = mean(cumsum)) %>%
+  # calculate median extinction rate per year
+  dplyr::summarise(cum_median = median(cumsum),
+                   cum_low = HDInterval::hdi(cumsum, credMass = 0.95)[[1]],
+                   cum_upp = HDInterval::hdi(cumsum, credMass = 0.95)[[2]]) %>%
   # BCE/CE
   dplyr::mutate(pred_date_ce = 1950 - pred_date)
 
@@ -1013,12 +1033,12 @@ ex_da_years_sum[which.max(ex_da_years_sum$ma_mean),]
 
 ```{r}
 
-# Figure 2
+# Map prep
 
 # recenter
 center <- 145
 
-# world map centred on 145
+# world map centered on 145
 mapWorld <- ggplot2::map_data("world", wrap = c(center - 180, center + 180), ylim = c(-60, 85), interior = FALSE)
 
 # recenter islands
@@ -1028,10 +1048,16 @@ isl_pnts$long_recenter <- ifelse(isl_pnts$Long < center - 180, isl_pnts$Long + 3
 # group islands into archipelagos
 arch_pnts <- isl_pnts %>%
   dplyr::group_by(Archip) %>%
+  # weighted average lat and long - weighted by island area
   dplyr::summarise(mean_long_re = weighted.mean(long_recenter, Area), mean_lat = weighted.mean(Lat, Area))
+
+#### Figure 2 ####
+
+## 2a
 
 # plot total bird extinction violin
 swarm_tot <- ggplot2::ggplot(ex_tot, ggplot2::aes(x = 1, y = n)) +
+  # half violin
   gghalves::geom_half_violin(side = "r", fill = "grey", colour = "grey") +
   # 95% credible interval
   ggplot2::geom_linerange(ggplot2::aes(ymin = ex_tot_hdi$lower, ymax = ex_tot_hdi$upper), colour = "grey40", lwd = 0.8) +
@@ -1039,26 +1065,39 @@ swarm_tot <- ggplot2::ggplot(ex_tot, ggplot2::aes(x = 1, y = n)) +
   ggplot2::geom_point(ggplot2::aes(y = ex_tot_hdi$median), size = 4, colour = "grey40") +
   # label for median
   ggplot2::annotate("text", x = 1.12, y = ex_tot_hdi$median, label = round(ex_tot_hdi$median, digits = 0), colour = "grey40") +
+  # scale across plots
   ggplot2::scale_y_continuous(limits = c(0, (1.05 * max(ex_tot$n))), expand = c(0, 0)) +
   ggplot2::scale_x_continuous(breaks = 1, labels = "Total") +
+  # y axis label
   ggplot2::labs(y = "Extinct birds") +
   ggplot2::theme(axis.title.x = ggplot2::element_blank())
 
 # combine summaries
-all_bar <- dplyr::bind_rows(hist_cross_all, pre_kno_cross_all, pre_un_cross_all) %>% 
+all_bar <- dplyr::bind_rows(hist_cross_all, pre_kno_cross_all, pre_un_cross_all) %>%
+  # remove lower and upper values for fossils
   dplyr::mutate_at(vars(c("lower", "upper")), ~ifelse(grp == "Fossil", NA, .)) %>% 
+  # order factor for exticntion types
   dplyr::mutate(grp = factor(grp, levels = c("Observed", "Fossil", "Undiscovered")))
 
+# create 2a plot
 swarm_dot <- ggplot2::ggplot(all_bar, ggplot2::aes(x = grp, y = median, colour = grp)) +
+  # keep plot dimensions
   ggplot2::geom_point(colour = NA) +
+  # half violins
   gghalves::geom_half_violin(data = pre_un_all, ggplot2::aes(x = 3, y = n), side = "r", fill = "#ffac6a", colour = "#ffac6a", inherit.aes = FALSE) +
+  # 95% credibe intervals
   ggplot2::geom_linerange(ggplot2::aes(ymin = lower, ymax = upper), lwd = 0.8) +
+  # dots for medians
   ggplot2::geom_point(size = 4) +
+  # labels for medians
   ggplot2::annotate("text", x = 1.15, y = all_bar$median[[1]], label = round(all_bar$median[[1]], digits = 0), colour = "#CC79A7") +
   ggplot2::annotate("text", x = 2.15, y = all_bar$median[[2]], label = round(all_bar$median[[2]], digits = 0), colour = "#0072B2") +
   ggplot2::annotate("text", x = 3.15, y = all_bar$median[[3]], label = round(all_bar$median[[3]], digits = 0), colour = "#D55E00") +
+  # scale across plots
   ggplot2::scale_y_continuous(limits = c(0, (1.05 * max(ex_tot$n))), expand = c(0, 0)) +
+  # colours
   ggplot2::scale_colour_manual(values = c("#CC79A7", "#0072B2", "#D55E00")) +
+  # remove chart junk
   ggplot2::theme(legend.position = "none",
                  axis.title.x = ggplot2::element_blank(),
                  axis.line.y = ggplot2::element_blank(),
@@ -1069,14 +1108,19 @@ swarm_dot <- ggplot2::ggplot(all_bar, ggplot2::aes(x = grp, y = median, colour =
 # combine total and dot plot
 swarm_tot_dot <- cowplot::plot_grid(swarm_tot, swarm_dot, rel_widths = c(0.5, 1))
 
+## 2b
+
 # map
 
 # observed
 hist_all_pie <- ex_da_all %>%   
+  # filter to observed extinctions
   dplyr::filter(dist == "hist_kno" | dist == "hist_un") %>% 
+  # count extinctions per archipelago per run
   dplyr::group_by(Archip) %>%
   dplyr::count(run) %>% 
   dplyr::group_by(Archip) %>% 
+  # median across runs
   dplyr::summarise_at(vars(n), median) %>% 
   dplyr::rename(hist = n)
                       
@@ -1103,20 +1147,34 @@ all_pie <- dplyr::full_join(hist_all_pie, pre_kno_all_pie, by = "Archip") %>%
   dplyr::full_join(pre_un_all_pie, by = "Archip")
 
 arch_pnts_swarm <- arch_pnts %>% 
+  # join extinction counts to archipelago data
   dplyr::left_join(all_pie, by = "Archip") %>% 
+  # fill out zeros
   tidyr::replace_na(list(hist = 0, pre_kno = 0, pre_un = 0)) %>% 
+  # total
   dplyr::mutate(tot = hist + pre_kno + pre_un) %>% 
+  # total adjusted to area of circle
   dplyr::mutate(tot_a = sqrt(tot/pi))
 
+# create 2b plot
 swarm_map <- ggplot2::ggplot(ggplot2::aes(x = long, y = lat), data = mapWorld) +
+  # plot polygons for basemap
   ggplot2::geom_polygon(ggplot2::aes(group = group), fill = "grey65") +
+  # add pies
   scatterpie::geom_scatterpie(data = arch_pnts_swarm, ggplot2::aes(x = mean_long_re, y = mean_lat, group = Archip, r = tot_a * 1.6), cols = colnames(arch_pnts_swarm)[4:6], alpha = 0.8, colour = NA) +  
+  # equal coordinates for map
   ggplot2::coord_equal() +
+  # add longitude scale
   ggplot2::scale_x_continuous(expand = c(0, 0), breaks = c(0, 90, 180, 270), labels = c(paste0("0", "°"), paste0("90", "°E"), paste0("180", "°"), paste0("90", "°W"))) +
+  # clip latitude
   ggplot2::scale_y_continuous(limits = c(-60, 85)) +
+  # colours
   ggplot2::scale_fill_manual(labels = c("Observed ", "Fossil", "Undiscovered"), values = c("#CC79A7", "#0072B2", "#D55E00")) +
+  # axis labels
   ggplot2::labs(x = "Longitude", y = "Latitude", size = "Undiscovered prehistoric extinct birds") +
+  # legend for pies
   scatterpie::geom_scatterpie_legend((dplyr::filter(arch_pnts_swarm, tot > 0)$tot_a * 1.6), n = 3, x = 215, y = -48, labeller = function(x) signif(pi * (x / 1.6) ^ 2, 1)) +
+  # shift legend to bottom and remove legend title
   ggplot2::theme(legend.position = "bottom",
                  legend.title = ggplot2::element_blank())
 
@@ -1124,7 +1182,226 @@ swarm_map <- ggplot2::ggplot(ggplot2::aes(x = long, y = lat), data = mapWorld) +
 swarm_pie <- cowplot::plot_grid(swarm_tot_dot, swarm_map, nrow = 2, ncol = 1, labels = "auto") +
   ggplot2::theme(plot.background = ggplot2::element_rect(fill = "white", colour = "white"))
 
-# cowplot::save_plot("figures/swarm_pie_bigger.png", swarm_pie, base_width = 10, base_height = 10, dpi = 300)
+cowplot::save_plot("figures/fig_2_swarmpie.png", swarm_pie, base_width = 10, base_height = 10, dpi = 300)
+
+#### Figure 3 ####
+
+## 3a
+
+# text size scaler
+size_gt <- 6
+
+# cumulative extinctions inset
+ski_zoom <- ggplot2::ggplot(ex_da_years_cum, ggplot2::aes(x = pred_date_ce, y = cum_median)) +
+  # ribbon of uncertainty
+  ggplot2::geom_ribbon(ggplot2::aes(ymin = cum_low, ymax = cum_upp), fill = "lightgrey") +
+  # median line
+  ggplot2::geom_path(lwd = 1.5, show.legend = FALSE) +
+  # clip plot and specify tidy breaks
+  ggplot2::scale_x_continuous(limits = c(-5000, (max(ex_da_years_sum$pred_date_ce) * 1.1)), breaks = c(-4000, -2000, 0, 2000), expand = c(0, 0), name = "Year") +
+  # specify tidy breaks with commas
+  ggplot2::scale_y_continuous(expand = c(0, 0), breaks = c(0, 200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800), labels = scales::comma, name = "Cumulative bird extinctions")
+
+# extinction rate through time
+wiggle_zoom <- ggplot2::ggplot(ex_da_years_sum, ggplot2::aes(x = pred_date_ce, y = ma_median)) +
+  # baseline extinctions dashed line
+  ggplot2::geom_hline(yintercept = 0.2e-05, lty = 2) +
+  # ribbon of uncertainty
+  ggplot2::geom_ribbon(ggplot2::aes(ymin = ma_low, ymax = ma_upp), fill = "lightgrey") +
+  # median line
+  ggplot2::geom_path(lwd = 1.5, show.legend = FALSE) +
+  # add lines and text to show position of EX1
+  ggplot2::geom_segment(ggplot2::aes(x = -1541, y = (4.395691e-05 + 4e-06), xend = 438, yend = (4.395691e-05 + 4e-06)), lwd = 1.1, colour = "#CC79A7") +
+  ggplot2::geom_segment(ggplot2::aes(x = -1541, y = (4.395691e-05 + 5e-06), xend = -1541, yend = (4.395691e-05 + 3e-06)), lwd = 1.1, colour = "#CC79A7") +
+  ggplot2::geom_segment(ggplot2::aes(x = 438, y = (4.395691e-05 + 5e-06), xend = 438, yend = (4.395691e-05 + 3e-06)), lwd = 1.1, colour = "#CC79A7") +
+  ggplot2::geom_text(ggplot2::aes(x = -551.5, y = (4.395691e-05 + 8e-06), label = "EX1"), colour = "#CC79A7", size = size_gt) +
+  # add lines and text to show position of EX2
+  ggplot2::geom_segment(ggplot2::aes(x = 459, y = (0.0001566098 + 4e-06), xend = 1742, yend = (0.0001566098 + 4e-06)), lwd = 1.1, colour = "#D55E00") +
+  ggplot2::geom_segment(ggplot2::aes(x = 459, y = (0.0001566098 + 5e-06), xend = 459, yend = (0.0001566098 + 3e-06)), lwd = 1.1, colour = "#D55E00") +
+  ggplot2::geom_segment(ggplot2::aes(x = 1742, y = (0.0001566098 + 5e-06), xend = 1742, yend = (0.0001566098 + 3e-06)), lwd = 1.1, colour = "#D55E00") +
+  ggplot2::geom_text(ggplot2::aes(x = 1100.5, y = (0.0001566098 + 8e-06), label = "EX2"), colour = "#D55E00", size = size_gt) +
+  # add lines and text to show position of EX3
+  ggplot2::geom_segment(ggplot2::aes(x = 1742, y = (8.246472e-05 + 4e-06), xend = 2019, yend = (8.246472e-05 + 4e-06)), lwd = 1.1, colour = "#0072B2") +
+  ggplot2::geom_segment(ggplot2::aes(x = 1742, y = (8.246472e-05 + 5e-06), xend = 1742, yend = (8.246472e-05 + 3e-06)), lwd = 1.1, colour = "#0072B2") +
+  ggplot2::geom_segment(ggplot2::aes(x = 2019, y = (8.246472e-05 + 5e-06), xend = 2019, yend = (8.246472e-05 + 3e-06)), lwd = 1.1, colour = "#0072B2") +
+  ggplot2::geom_text(ggplot2::aes(x = 1881, y = (8.246472e-05 + 8e-06), label = "EX3"), colour = "#0072B2", size = size_gt) +
+  # clip plot and specify tidy breaks
+  ggplot2::scale_x_continuous(limits = c(-5000, (max(ex_da_years_sum$pred_date_ce) * 1.1)), breaks = c(-5000, -4000, -3000, -2000, -1000, 0, 1000, 2000), expand = c(0, 0), name = "Year") +
+  # fancy scientific labels
+  ggplot2::scale_y_continuous(limits = c(0, (max(ex_da_years_sum$ma_upp, na.rm = TRUE) * 1.1)), expand = c(0, 0), labels = fancy_scientific, name = "Bird extinction rate (extinctions/species/year)") +
+  # tidy plot
+  ggplot2::theme(plot.title = ggplot2::element_text(hjust = 0.5),
+                 text = ggplot2::element_text(size = 20),
+                 axis.text = ggplot2::element_text(size = 15))
+
+# combine extinction plots
+wig_c <- cowplot::ggdraw() +
+  # extinction rate through time
+  cowplot::draw_plot(wiggle_zoom) +
+  # inset cumulative extinctions
+  cowplot::draw_plot(ski_zoom, x = 0.2, y = 0.4, width = 0.4, height = 0.4)
+
+# use this code (and adapt numbers) to find peaks and boundaries of extinction events
+test <- dplyr::filter(ex_da_years_sum, pred_date_ce > 2000 & pred_date_ce < 0)
+
+## 3b
+# extinction events maps
+
+# extinction events are based on full dataset not simplified dataset
+
+# count extinctions per archipelago for extinction event 1
+b1 <- ex_da_all %>%
+  # filter to years of extinction event
+  dplyr::filter(pred_date_ce > -1541 & pred_date_ce < 438) %>%
+  # count extinctions and sort archipelagos
+  dplyr::count(Archip, sort = TRUE) %>%
+  # convert into actual numbers of extinctions
+  dplyr::mutate(count = n / n_samp) 
+
+# count extinctions per archipelago for extinction event 2
+b2 <- ex_da_all %>%
+  dplyr::filter(pred_date_ce > 459 & pred_date_ce < 1742) %>%
+  dplyr::count(Archip, sort = TRUE) %>%
+  dplyr::mutate(count = n / n_samp) 
+
+# count extinctions per archipelago for extinction event 3
+b3 <- ex_da_all %>%
+  dplyr::filter(pred_date_ce > 1742) %>%
+  dplyr::count(Archip, sort = TRUE) %>%
+  dplyr::mutate(count = n / n_samp)
+
+# combine
+b_all <- rbind(b1, b2, b3)
+
+# rank archipelagos by extinctions within extinction event 1
+ap_b1 <- arch_pnts %>%
+  # join extinction counts
+  dplyr::right_join(b1, by = "Archip") %>%
+  # rank archipelagos by number of extinctions
+  dplyr::mutate(rank = rank(desc(count), ties.method = "first")) %>%
+  # get names of top 5 archipelagos
+  dplyr::mutate(Archip_neat = ifelse(rank < 6, Archip, "")) %>%
+  # get rank numbers 1 to 5
+  dplyr::mutate(rank = ifelse(rank < 6, rank, "")) %>% 
+  dplyr::arrange(rank) %>% 
+  dplyr::mutate(Archip_neat = factor(Archip_neat, levels = unique(.$Archip_neat)))
+
+# rank archipelagos by extinctions within extinction event 2
+ap_b2 <- arch_pnts %>%
+  dplyr::right_join(b2, by = "Archip") %>%
+  dplyr::mutate(rank = rank(desc(count), ties.method = "first")) %>%
+  dplyr::mutate(Archip_neat = ifelse(rank < 6, Archip, "")) %>%
+  dplyr::mutate(rank = ifelse(rank < 6, rank, "")) %>% 
+  dplyr::arrange(rank) %>% 
+  # convert to factor
+  dplyr::mutate(Archip_neat = factor(Archip_neat, levels = unique(.$Archip_neat)))
+
+# rank archipelagos by extinctions within extinction event 3
+ap_b3 <- arch_pnts %>%
+  dplyr::right_join(b3, by = "Archip") %>%
+  dplyr::mutate(rank = rank(desc(count), ties.method = "first")) %>%
+  dplyr::mutate(Archip_neat = ifelse(rank < 6, Archip, "")) %>%
+  dplyr::mutate(rank = ifelse(rank < 6, rank, "")) %>% 
+  dplyr::arrange(rank) %>% 
+  dplyr::mutate(Archip_neat = factor(Archip_neat, levels = unique(.$Archip_neat)))
+
+# scaler for range of point sizes
+scaler <- c(3, 20)
+# transparency
+alpha <- 0.5
+
+b1_map <- ggplot2::ggplot(ggplot2::aes(x = long, y = lat), data = mapWorld) +
+  # polygons for basemap
+  ggplot2::geom_polygon(ggplot2::aes(group = group), fill = "grey65") +
+  # points showing extinctions
+  ggplot2::geom_point(data = ap_b1, ggplot2::aes(x = mean_long_re, y = mean_lat, size = count), colour = "#CC79A7", alpha = alpha, show.legend = FALSE) +
+  # label ranks
+  ggplot2::geom_text(data = ap_b1, ggplot2::aes(x = mean_long_re, y = mean_lat, label = rank), size = 4) +
+  # title and y axis title
+  ggplot2::labs(title = "1541 BCE - 438 CE", y = "EX1", x = "") +
+  ggplot2::scale_discrete_identity(aesthetics = "label", name = "", breaks = as.factor(ap_b1$rank), labels = ap_b1$Archip_neat, guide = "legend") +
+  # clip latitude
+  ggplot2::scale_y_continuous(limits = c(-60, 85)) +
+  # scale size of points
+  ggplot2::scale_size(range = scaler, limits = c(min(b_all$count), max(b_all$count))) +
+  # equal coordinates for map
+  ggplot2::coord_equal() +
+  # tidy plot
+  ggplot2::theme(legend.title = ggplot2::element_blank(),
+                 axis.title.y = ggplot2::element_text(colour = "#CC79A7", angle = 0, vjust = 0.5),
+                 axis.text = ggplot2::element_blank(),
+                 axis.ticks = ggplot2::element_blank(),
+                 axis.line = ggplot2::element_blank(),
+                 plot.title = ggplot2::element_text(hjust = 0.5),
+                 axis.title = ggplot2::element_text(size = 20),
+                 legend.justification = "top")
+
+b2_map <- ggplot2::ggplot(ggplot2::aes(x = long, y = lat), data = mapWorld) +
+  ggplot2::geom_polygon(ggplot2::aes(group = group), fill = "grey65") +
+  ggplot2::geom_point(data = ap_b2, ggplot2::aes(x = mean_long_re, y = mean_lat, size = count), colour = "#D55E00", alpha = alpha, show.legend = FALSE) +
+  ggplot2::geom_text(data = ap_b2, ggplot2::aes(x = mean_long_re, y = mean_lat, label = rank), size = 4) +
+  ggplot2::labs(title = "459 CE - 1742 CE", y = "EX2", x = "") +
+  ggplot2::scale_discrete_identity(aesthetics = "label", name = "", breaks = as.factor(ap_b2$rank), labels = ap_b2$Archip_neat, guide = "legend") +
+  ggplot2::scale_y_continuous(limits = c(-60, 85)) +
+  ggplot2::scale_size(range = scaler, limits = c(min(b_all$count), max(b_all$count))) +
+  ggplot2::coord_equal()  +
+  ggplot2::theme(legend.title = ggplot2::element_blank(),
+                 axis.title.y = ggplot2::element_text(colour = "#D55E00", angle = 0, vjust = 0.5),
+                 axis.text = ggplot2::element_blank(),
+                 axis.ticks = ggplot2::element_blank(),
+                 axis.line = ggplot2::element_blank(),
+                 plot.title = ggplot2::element_text(hjust = 0.5),
+                 axis.title = ggplot2::element_text(size = 20),
+                 legend.justification = "top",
+                 legend.margin = ggplot2::margin(c(5,5,5,1)))
+
+b3_map <- ggplot2::ggplot(ggplot2::aes(x = long, y = lat), data = mapWorld) +
+  ggplot2::geom_polygon(ggplot2::aes(group = group), fill = "grey65") +
+  ggplot2::geom_point(data = ap_b3, ggplot2::aes(x = mean_long_re, y = mean_lat, size = count), colour = "#0072B2", alpha = alpha, show.legend = FALSE) +
+  ggplot2::geom_text(data = ap_b3, ggplot2::aes(x = mean_long_re, y = mean_lat, label = rank), size = 4) +
+  ggplot2::labs(title = "1742 CE - 2019 CE", y = "EX3", x = "") +
+  ggplot2::scale_discrete_identity(aesthetics = "label", name = "", breaks = as.factor(ap_b3$rank), labels = ap_b3$Archip_neat, guide = "legend") +
+  ggplot2::scale_y_continuous(limits = c(-60, 85)) +
+  ggplot2::scale_size(range = scaler, limits = c(min(b_all$count), max(b_all$count))) +
+  ggplot2::coord_equal()  +
+  ggplot2::theme(legend.title = ggplot2::element_blank(),
+                 axis.title.y = ggplot2::element_text(colour = "#0072B2", angle = 0, vjust = 0.5),
+                 axis.text = ggplot2::element_blank(),
+                 axis.ticks = ggplot2::element_blank(),
+                 axis.line = ggplot2::element_blank(),
+                 plot.title = ggplot2::element_text(hjust = 0.5),
+                 axis.title = ggplot2::element_text(size = 20),
+                 legend.justification = "top")
+
+# legend for maps
+b_leg <- ggplot2::ggplot(ggplot2::aes(x = long, y = lat), data = mapWorld) +
+  ggplot2::geom_point(data = ap_b1, ggplot2::aes(x = mean_long_re, y = mean_lat, size = count), colour = "grey", alpha = alpha, show.legend = TRUE) +
+  ggplot2::labs(size = "Extinctions") +
+  ggplot2::scale_y_continuous(limits = c(-60, 85)) +
+  # choose breaks for legedn of point sizes
+  ggplot2::scale_size(range = scaler, limits = c(min(b_all$count), max(b_all$count)), breaks = c(5, 30, 100)) +
+  ggplot2::coord_equal() +
+  ggplot2::theme(legend.direction = "horizontal") +
+  ggplot2::guides(size = ggplot2::guide_legend(title.position = "top", title.hjust = 0.5))
+
+# get legend for maps
+b_leg <- cowplot::get_legend(b_leg)
+
+# combine extinction event maps
+ee <- cowplot::plot_grid(b1_map, b2_map, b3_map, nrow = 3, labels = c("b", "c", "d"))
+
+# combine extinction event maps and legend
+ee_leg <- cowplot::ggdraw() +
+  # extinction event maps
+  cowplot::draw_plot(ee) +
+  # map legend
+  cowplot::draw_plot(b_leg, x = 0.71, y = -0.1, width = 0.3, height = 0.3)
+  
+# combine exticntion rate plot and extiontion event maps plot
+wig_window <- cowplot::plot_grid(wig_c, ee_leg, nrow = 1, ncol = 2, labels = c("a", "")) +
+  ggplot2::theme(plot.background = ggplot2::element_rect(fill = "white", colour = "white"))
+
+cowplot::save_plot("figures/fig_3_wiggle.png", wig_window, base_width = 18, base_height = 10, dpi = 300, bg = "white")
 
 ```
 
@@ -1231,8 +1508,8 @@ for (it in 0:1000000){
 res <- as.data.frame(res) %>% 
   setNames(c("it", "likA", "LA", "kA", "x0A", "dyA", "epsilonA"))
 
-# simple plot of estimated results
-plot(dates_descr$described, dat); lines(dates_descr$described, get_mu0_logistic(LA, kA, x0A, x) + dyA)
+# # simple plot of estimated results
+# plot(dates_descr$described, dat); lines(dates_descr$described, get_mu0_logistic(LA, kA, x0A, x) + dyA)
 
 # sample from lower bound
 
@@ -1242,6 +1519,36 @@ low_samp <- res[11:nrow(res),] %>%
   # subtract described species from describable species to get undescribed species
   dplyr::mutate(low_spp = LA - sum(dates_descr$n)) %>%
   dplyr::mutate(dist = "low")
+
+# # load: low_samp
+# low_samp <- readRDS("data/low_samp_1000.rds") # this is the full dataset from the study
+
+df <- cbind(dates_descr[,1], dat, mu0) %>% 
+  as.data.frame()
+
+p1 <- ggplot2::ggplot(df, ggplot2::aes(x = described, y = dat)) +
+  ggplot2::geom_point(colour = "black") +
+  ggplot2::geom_line(ggplot2::aes(x = described, y = mu0), colour = "black") +
+  ggplot2::scale_y_continuous(limits = c(0, max(low_samp$LA) + 20), breaks = scales::pretty_breaks(n = 5)) +
+  ggplot2::labs(x = "Year described", y = "Fossil extinct birds")
+
+p2 <- ggplot2::ggplot(low_samp, ggplot2::aes(x = dist, y = LA)) +
+  gghalves::geom_half_violin(side = "r", fill = "#009E73", colour = "#009E73") +
+  ggplot2::geom_point(data = data.frame(dist = "low", LA = median(low_samp$LA)), colour = "#009E73", size = 5, shape = 15) +
+  ggplot2::ylim(0, max(low_samp$LA) + 20) +
+  ggplot2::scale_x_discrete(labels = c("Describable species")) +
+  ggplot2::theme(panel.border = ggplot2::element_blank(), 
+                 axis.line = ggplot2::element_line(), 
+                 axis.line.y = ggplot2::element_blank(), 
+                 axis.title = ggplot2::element_blank(), 
+                 axis.text.y = ggplot2::element_blank(), 
+                 axis.ticks.y = ggplot2::element_blank(), 
+                 legend.position = "none")
+
+p_comb <- cowplot::plot_grid(p1, p2, rel_widths = c(1, 0.6), align = "h") +
+  ggplot2::theme(plot.background = ggplot2::element_rect(fill = "white", colour = "white"))
+
+cowplot::save_plot("figures/fig_5_lowspp.png", p_comb, base_width = 12, base_height = 7, dpi = 300)
 
 median(low_samp$low_spp)
 
