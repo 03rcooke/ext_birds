@@ -7,6 +7,9 @@ authors:
 - family-names: "Sayol"
   given-names: "Ferran"
   orcid: "https://orcid.org/0000-0003-3540-7487"
+- family-names: "Andermann"
+  given-names: "Tobias"
+  orcid: "https://orcid.org/0000-0002-0932-1623"
 title: "Undiscovered bird extinctions obscure the true magnitude of human-driven extinction waves"
 version: 1.1.1
 doi: 10.5281/zenodo.10014217
@@ -21,6 +24,8 @@ preferred-citation:
   - family-names: "Sayol"
     given-names: "Ferran"
     orcid: "https://orcid.org/0000-0003-3540-7487"
+  - family-names: "Andermann"
+    given-names: "Tobias"
   doi:
   journal: "Nature Communications"
   month: 
